@@ -1,0 +1,17 @@
+{
+  "name": "krishisat",
+  "version": "1.3.0",
+  "private": true,
+  "description": "KrishiSat — parametric crop-insurance decision support. Root manifest exists so Vercel resolves the serverless function's dependencies from the project root (PRD §21.2).",
+  "scripts": {
+    "build": "npm --prefix frontend install && npm --prefix frontend run build",
+    "dev:api": "node backend/server.js",
+    "dev:web": "npm --prefix frontend run dev"
+  },
+  "dependencies": {
+    "@supabase/supabase-js": "^2.117.2",
+    "axios": "^1.19.0",
+    "cors": "^2.8.6",
+    "express": "^5.2.1"
+  }
+}

@@ -1,6 +1,15 @@
 const express = require('express');
 const cors = require('cors');
 const axios = require('axios');
+const path = require('path');
+const fs = require('fs');
+
+// The one permitted database accessor (PRD §14.5). Nothing else in this file
+// may import a database client.
+const recommendations = require('./repositories/recommendations');
+
+// Committed core artifact (PRD §14.2). Absent until scripts/build-core.sh runs.
+const CORE_ARTIFACT = path.join(__dirname, 'core', 'ks_core.wasm');
 
 const app = express();
 app.use(cors());
@@ -167,15 +176,79 @@ app.get('/api/ledger', (req, res) => {
     return res.json(transactions);
 });
 
-// ── Health check — confirms server is alive ───────────────────────────────────
-app.get('/api/health', (req, res) => res.json({ status: 'ok', ts: Date.now() }));
-
-app.listen(5000, () => {
-    console.log('');
-    console.log('  ╔══════════════════════════════════════════════╗');
-    console.log('  ║  KrishiSat Core Data Engine  — port 5000    ║');
-    console.log('  ║  Districts: jalna · bikaner · dewas ·        ║');
-    console.log('  ║             anantapur                        ║');
-    console.log('  ╚══════════════════════════════════════════════╝');
-    console.log('');
+// ── GET /ks_core.wasm ─────────────────────────────────────────────────────────
+// Serves the SINGLE core artifact, so the browser loads the same bytes the server
+// computes with (§14.2, §15.8). Never duplicated into the frontend bundle.
+// 503 when the core has not been built yet — an explicit missing-artifact signal
+// rather than a 404 that looks like a typo.
+app.get('/ks_core.wasm', (req, res) => {
+    if (!fs.existsSync(CORE_ARTIFACT)) {
+        return res.status(503).json({
+            error: 'Core artifact not built',
+            detail: 'backend/core/ks_core.wasm is missing. Build it with scripts/build-core.sh (PRD §14.2).',
+        });
+    }
+    res.type('application/wasm');
+    res.setHeader('Cache-Control', 'public, max-age=300');
+    return res.sendFile(CORE_ARTIFACT);
 });
+
+// ── GET /api/cron/recommendations ─────────────────────────────────────────────
+// The authenticated cron entrypoint declared in vercel.json (§21.2). Vercel sends
+// `Authorization: Bearer $CRON_SECRET`. Fails CLOSED: with no CRON_SECRET set the
+// endpoint refuses rather than running unauthenticated.
+//
+// The writer itself — backend/services/recommendationLog.js (F15, §20.1) — is not
+// implemented. This deliberately answers 501 rather than pretending to succeed, so
+// a scheduled run cannot look like a working log while recording nothing.
+app.get('/api/cron/recommendations', (req, res) => {
+    const secret = process.env.CRON_SECRET;
+    if (!secret) {
+        return res.status(500).json({ error: 'CRON_SECRET is not configured' });
+    }
+    if (req.get('authorization') !== `Bearer ${secret}`) {
+        return res.status(401).json({ error: 'Unauthorized' });
+    }
+    return res.status(501).json({
+        error: 'Not implemented',
+        detail: 'The recommendation-log writer (backend/services/recommendationLog.js) is specified by PRD F15/§20.1 but not yet implemented.',
+    });
+});
+
+// ── GET /api/health ───────────────────────────────────────────────────────────
+// PRD §18.8. The `log` block is advisory and is evaluated in its own try/catch: a
+// database that is down must NOT make the API report itself unhealthy while every
+// read path still works (§16.2). `status` reflects the API and its sources only.
+app.get('/api/health', async (req, res) => {
+    let log;
+    try {
+        log = await recommendations.health();
+    } catch (err) {
+        log = { reachable: false, configured: false, lastAppendAt: null, empty: true, stale: false, reason: 'unexpected error' };
+    }
+    return res.json({ status: 'ok', ts: Date.now(), log });
+});
+
+// ── Listen only when run directly ─────────────────────────────────────────────
+// `api/index.js` imports this module as the Vercel handler, and the platform owns
+// the listener there (§21.2). Listening on import would open a port inside a
+// serverless function, so the guard is what makes this file reusable as both the
+// local dev server and the deployed handler.
+if (require.main === module) {
+    const PORT = Number(process.env.PORT) || 5000;
+    app.listen(PORT, () => {
+        console.log('');
+        console.log('  ╔══════════════════════════════════════════════╗');
+        console.log(`  ║  KrishiSat Core Data Engine  — port ${String(PORT).padEnd(4)}      ║`);
+        console.log('  ║  Districts: jalna · bikaner · dewas ·        ║');
+        console.log('  ║             anantapur                        ║');
+        console.log('  ╚══════════════════════════════════════════════╝');
+        console.log('');
+    });
+}
+
+/**
+ * Exported for the serverless entrypoint (api/index.js). The Express app is the
+ * handler; see api/index.js for why it must not be started here.
+ */
+module.exports = app;
