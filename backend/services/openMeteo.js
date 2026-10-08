@@ -133,9 +133,20 @@ async function fetchArchiveSoil(point, startDate, endDate) {
     + '&hourly=soil_moisture_0_to_7cm'
     + `&timezone=${encodeURIComponent(TIMEZONE)}`;
   const data = await getJson(url);
+  return { daily: soilDailyMeans(data.hourly), hoursPerDay: 24 };
+}
 
-  const times = data.hourly && data.hourly.time;
-  const values = data.hourly && data.hourly.soil_moisture_0_to_7cm;
+/**
+ * Hourly ERA5-Land soil moisture → daily means, shared by both archive readers.
+ * A day with fewer than `MIN_HOURS_PER_DAY` usable hours is `null` — reported as
+ * a gap, never filled with a zero or a neighbouring value (§13.1, §15.6).
+ *
+ * @param {{time:string[], soil_moisture_0_to_7cm:(number|null)[]}} hourly
+ * @returns {{date:string, soilMoisture:number|null}[]}
+ */
+function soilDailyMeans(hourly) {
+  const times = hourly && hourly.time;
+  const values = hourly && hourly.soil_moisture_0_to_7cm;
   if (!Array.isArray(times) || !Array.isArray(values) || times.length !== values.length) {
     throw new Error('Open-Meteo archive: hourly soil_moisture_0_to_7cm malformed');
   }
@@ -151,7 +162,7 @@ async function fetchArchiveSoil(point, startDate, endDate) {
   }
 
   const allDates = [...new Set(times.map((t) => t.slice(0, 10)))].sort();
-  const daily = allDates.map((date) => {
+  return allDates.map((date) => {
     const hours = byDay.get(date) || [];
     return {
       date,
@@ -160,8 +171,46 @@ async function fetchArchiveSoil(point, startDate, endDate) {
         : null,
     };
   });
+}
 
-  return { daily, hoursPerDay: 24 };
+/**
+ * Archive API in ONE call: daily precipitation totals AND the ERA5-Land soil
+ * series for the same range. Used by the F14 scenario replay (§10.2 F14), which
+ * reads a past window that the Forecast API cannot reach: `past_days` only goes
+ * back a few months, while a replay reads a season from years ago.
+ *
+ * Same vendor, same discipline as the live path: a malformed or empty response
+ * is a DATA failure and throws (§15.6); a `200` carrying nulls yields `null` days
+ * rather than substituted numbers.
+ *
+ * @param {{lat:number,lon:number}} point
+ * @param {string} startDate ISO yyyy-mm-dd
+ * @param {string} endDate ISO yyyy-mm-dd
+ * @returns {Promise<{from:string, to:string,
+ *   precip:{date:string,precipMm:number|null}[],
+ *   soil:{date:string,soilMoisture:number|null}[], hoursPerDay:number}>}
+ */
+async function fetchArchiveWindow(point, startDate, endDate) {
+  const url = `${ARCHIVE_URL}?latitude=${point.lat}&longitude=${point.lon}`
+    + `&start_date=${startDate}&end_date=${endDate}`
+    + '&daily=precipitation_sum&hourly=soil_moisture_0_to_7cm'
+    + `&timezone=${encodeURIComponent(TIMEZONE)}`;
+  const data = await getJson(url);
+
+  const times = data.daily && data.daily.time;
+  const sums = data.daily && data.daily.precipitation_sum;
+  if (!Array.isArray(times) || !Array.isArray(sums) || times.length !== sums.length) {
+    throw new Error('Open-Meteo archive: daily precipitation_sum series malformed');
+  }
+  if (times.length === 0) throw new Error('Open-Meteo archive: empty response');
+
+  return {
+    from: startDate,
+    to: endDate,
+    precip: times.map((date, i) => ({ date, precipMm: isNum(sums[i]) ? sums[i] : null })),
+    soil: soilDailyMeans(data.hourly),
+    hoursPerDay: 24,
+  };
 }
 
 /** Mean of the forecast-model hourly series for one IST date, or null. */
@@ -175,6 +224,8 @@ function forecastSoilMeanForDate(hourlySoil, date) {
 module.exports = {
   fetchForecast,
   fetchArchiveSoil,
+  fetchArchiveWindow,
+  soilDailyMeans,
   forecastSoilMeanForDate,
   FORECAST_URL,
   ARCHIVE_URL,

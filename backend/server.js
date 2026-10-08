@@ -11,6 +11,8 @@
 //
 //   GET  /api/districts                     §18.1
 //   GET  /api/weather/:district?season=     §18.2
+//   GET  /api/weather/:district?scenario=   §18.2 + F14 (historic replay)
+//   GET  /api/scenarios                     F14   (committed catalogue)
 //   POST /api/calculate-payout              §18.3
 //   GET  /api/ledger                        §18.4   (simulated roster — see note)
 //   GET  /api/backtest/:district            §18.6   (committed snapshot; F11 slice)
@@ -37,6 +39,7 @@ const { computeDistrictWeather } = require('./engines/deficitEngine');
 const recommendationLog = require('./services/recommendationLog');
 const hindcast = require('./services/hindcast');
 const settlementLedger = require('./services/ledger');
+const scenarioService = require('./services/scenario');
 const memberRoster = require('./config/members');
 const { loadCore, CORE_SPECIFIER } = require('./engines/phenology');
 const { securityHeaders, corsAllowlist } = require('./middleware/security');
@@ -120,10 +123,21 @@ const ATTRIBUTION = [
   'Basemap: © OpenStreetMap contributors (https://openstreetmap.org/copyright), ODbL.',
 ];
 
+const CWSI_NOTE_LIVE = 'CWSI is derived from soil moisture — ERA5-Land reanalysis (0–7 cm) for historical points and a forecast model (3–9 cm) for the current point — not from satellite thermal-infrared canopy temperature.';
+
+// §28.3 names the source of EVERY CWSI point, so a replay must say something
+// different here: there is no forecast model with data for a date this old, and
+// the current point is an archive daily mean. Leaving the live wording in place
+// while publishing `era5_land_reanalysis` would make two of the product's own
+// labels disagree with each other.
+const CWSI_NOTE_SCENARIO = 'CWSI is derived from soil moisture — ERA5-Land reanalysis (0–7 cm) throughout this historic replay, including the current point, which is the archive daily mean on the anchor date (no forecast model has data for a date this old). It is not derived from satellite thermal-infrared canopy temperature.';
+
+const SCENARIO_NOTE = 'Scenario replay (F14): precipitation and soil moisture are read from the Open-Meteo Archive API (ERA5-Land + archived daily precipitation) for the stated window, and the 30-year expectation comes from the same committed NASA POWER baseline as the live view. The scenario itself was SELECTED from the NASA POWER hindcast (F11) — a different reanalysis — so the tier computed here can differ from the tier recorded at selection time; both are labelled rather than reconciled (§28.8).';
+
 const METHODOLOGY_NOTES = [
   'Drought duration is computed from archive data where available; when it is not, it is a model-derived estimate and the corresponding trigger clauses are disabled.',
   'Sum insured (₹50,000/ha) is a representative demo value; real PMFBY sums are crop- and district-specific via Scale of Finance.',
-  'CWSI is derived from soil moisture — ERA5-Land reanalysis (0–7 cm) for historical points and a forecast model (3–9 cm) for the current point — not from satellite thermal-infrared canopy temperature.',
+  CWSI_NOTE_LIVE,
   'Precipitation baseline is grid-cell-derived NASA POWER data, not station-interpolated IMD data.',
   'The settlement log is a simulation; no real financial transactions occur.',
   'This platform is a decision-support tool, not a licensed insurance product; all payout figures are recommendations.',
@@ -137,8 +151,17 @@ function istTimestamp(now = Date.now()) {
   return `${shifted.toISOString().slice(0, 19)}+05:30`;
 }
 
+/** §18.2 payload for one district. A replay swaps the CWSI note for the one that
+ *  describes its actual sources and appends the F14 disclosure (§28). */
+function methodologyNotes(scenario) {
+  if (!scenario) return METHODOLOGY_NOTES;
+  return METHODOLOGY_NOTES
+    .map((note) => (note === CWSI_NOTE_LIVE ? CWSI_NOTE_SCENARIO : note))
+    .concat(SCENARIO_NOTE);
+}
+
 /** §18.2 payload for one district. */
-function weatherPayload(result) {
+function weatherPayload(result, scenario = null) {
   const engine = result.engineOutput;
   const engineBlock = {
     baselineMonthlyMm: result.baselineProvenance.baselineMonthlyMm,
@@ -154,7 +177,12 @@ function weatherPayload(result) {
     cropStageMultiplier: result.cropStage.multiplier,
     weightedShortfallIndex: engine ? engine.weightedShortfallIndex : null,
     soilMoistureRaw: result.soilMoistureRaw,
-    soilMoistureRawSource: engine ? 'forecast_model' : null,
+    // Derived from the canonical input, never restated: the receipt publishes
+    // `currentSoilMoistureSource`, and a label that disagreed with the hashed one
+    // would be the exact defect §19.3 exists to prevent.
+    soilMoistureRawSource: engine && result.engineInput
+      ? result.engineInput.currentSoilMoistureSource
+      : null,
     historicalSoilMoistureSource: 'era5_land_reanalysis',
     soilMoistureSourceLabels: result.sourceLabels,
     fieldCapacity: result.district.fieldCapacity,
@@ -176,11 +204,15 @@ function weatherPayload(result) {
     percentSumInsured: engine ? engine.percentSumInsured : 0,
     dataSource: result.degraded
       ? `Degraded — ${result.degradedReason}`
-      : 'NASA POWER (30-yr baseline) + Open-Meteo (ERA5-Land reanalysis + forecast model)',
+      : (scenario
+        ? 'NASA POWER (30-yr baseline) + Open-Meteo Archive (ERA5-Land reanalysis + archived daily precipitation) — HISTORIC REPLAY'
+        : 'NASA POWER (30-yr baseline) + Open-Meteo (ERA5-Land reanalysis + forecast model)'),
     dataQuality: result.dataQuality,
   };
 
   return {
+    mode: scenario ? 'scenario' : 'live',
+    scenario: scenarioBlock(scenario),
     district: {
       id: result.district.id,
       name: result.district.name,
@@ -208,9 +240,57 @@ function weatherPayload(result) {
       : null,
     sourceQuality: result.sources,
     fallbackReasons: result.fallbackReasons,
-    methodologyNotes: METHODOLOGY_NOTES,
+    methodologyNotes: methodologyNotes(scenario),
     attribution: ATTRIBUTION,
   };
+}
+
+// ── F14 scenario helpers ─────────────────────────────────────────────────────
+// The label, the period and the "not current conditions" wording travel WITH the
+// numbers (§10.2 F14, §19.6), so a replay can never be presented as live no
+// matter which client reads the response.
+function scenarioBlock(scenario) {
+  if (!scenario) return null;
+  return {
+    id: scenario.id,
+    label: scenario.label,
+    districtId: scenario.districtId,
+    season: scenario.season,
+    year: scenario.year,
+    anchorDate: scenario.anchorDate,
+    period: scenario.period,
+    // The exact archive range this replay reads: 56 days ending on the anchor.
+    dataWindow: scenarioService.windowFor(scenario.anchorDate),
+    trigger: scenario.trigger,
+    selection: scenario.selection,
+    isReplay: true,
+    autoRefreshSuspended: true, // §19.5 — LIVE restores current conditions
+    banner: `Historic replay — ${scenario.label}. Real archive data for ${scenario.period.from} to ${scenario.period.to}, not current conditions.`,
+  };
+}
+
+// Validate `?scenario=` against the committed catalogue BEFORE anything is
+// computed: an unknown id is a 404 and an id belonging to another district is a
+// 400, so no request can make the engine read a window the catalogue never
+// selected. The id is matched against the list — never interpolated into an
+// outbound URL (§15.2).
+function readScenario(req, res, districtId) {
+  const raw = req.query.scenario;
+  if (raw === undefined || raw === '') return { scenario: null };
+  if (typeof raw !== 'string' || !scenarioService.SCENARIO_ID_RE.test(raw)) {
+    res.status(400).json({ error: 'Invalid scenario.' });
+    return { failed: true };
+  }
+  const scenario = scenarioService.getScenario(raw);
+  if (!scenario) {
+    res.status(404).json({ error: 'Scenario not found.' });
+    return { failed: true };
+  }
+  if (districtId && scenario.districtId !== districtId) {
+    res.status(400).json({ error: 'Scenario does not match the requested district.' });
+    return { failed: true };
+  }
+  return { scenario };
 }
 
 function parseSeason(req, res) {
@@ -226,12 +306,17 @@ function parseSeason(req, res) {
 // /api/weather and /api/cooperatives would otherwise each fan out to both external
 // APIs for the same district in the same window. Degraded results are never cached
 // (§16.2): caching "no data" would keep serving it after the source recovers.
-async function computeDistrictCached(districtId, seasonParam) {
-  const cacheKey = `result:${districtId}:${seasonParam || 'auto'}`;
+async function computeDistrictCached(districtId, seasonParam, scenario = null) {
+  // A scenario result is cached under ITS OWN key: mixing a historic replay and
+  // a live reading under one key would serve each as the other (§10.2 F14).
+  const cacheKey = `result:${districtId}:${seasonParam || 'auto'}:${scenario ? scenario.id : 'live'}`;
   const cached = cacheGet(cacheKey, 10 * 60 * 1000);
   if (cached) return cached;
 
-  const result = await computeDistrictWeather(districtId, { season: seasonParam });
+  const result = await computeDistrictWeather(districtId, {
+    season: seasonParam,
+    scenario: scenario || undefined,
+  });
   recordSources(result.sources);
   if (!result.degraded) cacheSet(cacheKey, result);
   return result;
@@ -285,18 +370,58 @@ app.get('/api/districts', rateLimit('expensive'), async (req, res, next) => {
   }
 });
 
+// ── GET /api/scenarios (F14) ───────────────────────────────────────────────
+// The committed catalogue (backend/config/scenarios.json): data, not code, so
+// the list can change without a release (§10.2 F14). Nothing here computes — a
+// missing catalogue answers 503 with the command that generates it, the same
+// honesty rule /api/backtest follows (§9.4, §16.2).
+app.get('/api/scenarios', rateLimit('normal'), (req, res) => {
+  const catalogue = scenarioService.readCatalogue();
+  if (!catalogue) {
+    return res.status(503).json({
+      error: 'Not available',
+      detail: 'The committed scenario catalogue (backend/config/scenarios.json, PRD §10.2 F14) has not been generated yet. Run: cd backend && node scripts/build-scenarios.js',
+    });
+  }
+  return res.json({
+    catalogue: {
+      source: 'backend/config/scenarios.json',
+      count: catalogue.scenarios.length,
+      rule: catalogue.rule,
+      derivedFrom: catalogue.derivedFrom,
+      builtAt: catalogue.builtAt,
+    },
+    scenarios: catalogue.scenarios,
+  });
+});
+
 // ── GET /api/weather/:district (§18.2) ───────────────────────────────────────
+// With `?scenario=<id>` (F14) the same route replays one committed historic
+// window instead of current conditions: the id is validated against the
+// catalogue first, the engine reads that window's archived series, and the
+// response carries the replay banner (§19.6) beside the very same §18.2 shape.
 app.get('/api/weather/:district', rateLimit('expensive'), validate.requireDistrict, async (req, res, next) => {
   try {
     const seasonParam = parseSeason(req, res);
     if (seasonParam === null) return;
 
-    const cacheKey = `weather:${req.district.id}:${seasonParam || 'auto'}`;
+    const chosen = readScenario(req, res, req.district.id);
+    if (chosen.failed) return;
+    const scenario = chosen.scenario;
+    if (scenario && seasonParam && seasonParam !== scenario.season) {
+      return res.status(400).json({ error: 'Season conflicts with the scenario.' });
+    }
+
+    const cacheKey = `weather:${req.district.id}:${scenario ? scenario.id : (seasonParam || 'auto')}`;
     const cached = cacheGet(cacheKey, 10 * 60 * 1000);
     if (cached) return res.json(cached);
 
-    const result = await computeDistrictCached(req.district.id, seasonParam);
-    const payload = weatherPayload(result);
+    const result = await computeDistrictCached(
+      req.district.id,
+      scenario ? scenario.season : seasonParam,
+      scenario,
+    );
+    const payload = weatherPayload(result, scenario);
 
     // A degraded response is not cached: caching "no data" would keep serving it
     // after the source recovers (§16.2).
@@ -343,9 +468,13 @@ app.post('/api/calculate-payout', rateLimit('payout'), async (req, res, next) =>
 //
 // memberPayout = hectares × tierPayoutPerHectare, 0 when the district is not
 // triggering; cooperativeSum = Σ memberPayout (§10.2 F12).
-async function buildCooperativePayload(district, seasonParam, overrides) {
+async function buildCooperativePayload(district, seasonParam, overrides, scenario = null) {
   const core = await loadCore();
-  const result = await computeDistrictCached(district.id, seasonParam);
+  const result = await computeDistrictCached(
+    district.id,
+    scenario ? scenario.season : seasonParam,
+    scenario,
+  );
 
   const roster = memberRoster.getMembers(district.id);
   const engine = result.engineOutput;
@@ -384,6 +513,10 @@ async function buildCooperativePayload(district, seasonParam, overrides) {
     date: result.seasonDate,
     season: result.season,
     cropStage: result.cropStage,
+    // F14: the aggregation follows the active mode and is labelled with the
+    // scenario, so a replayed cooperative total cannot read as a current one.
+    mode: scenario ? 'scenario' : 'live',
+    scenario: scenarioBlock(scenario),
     roster: {
       source: 'backend/config/members.js',
       memberCount: rows.length,
@@ -429,7 +562,12 @@ app.get('/api/cooperatives/:district', rateLimit('expensive'), validate.requireD
     try {
       const seasonParam = parseSeason(req, res);
       if (seasonParam === null) return;
-      return res.json(await buildCooperativePayload(req.district, seasonParam, {}));
+      const chosen = readScenario(req, res, req.district.id);
+      if (chosen.failed) return;
+      if (chosen.scenario && seasonParam && seasonParam !== chosen.scenario.season) {
+        return res.status(400).json({ error: 'Season conflicts with the scenario.' });
+      }
+      return res.json(await buildCooperativePayload(req.district, seasonParam, {}, chosen.scenario));
     } catch (err) {
       return next(err);
     }
@@ -440,6 +578,11 @@ app.post('/api/cooperatives/:district', rateLimit('expensive'), validate.require
     try {
       const seasonParam = parseSeason(req, res);
       if (seasonParam === null) return;
+      const chosen = readScenario(req, res, req.district.id);
+      if (chosen.failed) return;
+      if (chosen.scenario && seasonParam && seasonParam !== chosen.scenario.season) {
+        return res.status(400).json({ error: 'Season conflicts with the scenario.' });
+      }
 
       // A reference that is not in THIS district's roster would let a client append
       // phantom members and inflate the cooperative total (§15.2).
@@ -449,7 +592,9 @@ app.post('/api/cooperatives/:district', rateLimit('expensive'), validate.require
       const parsed = validate.validateHectareOverrides(req.body, validRefs);
       if (!parsed.ok) return res.status(400).json({ error: parsed.error });
 
-      const payload = await buildCooperativePayload(req.district, seasonParam, parsed.value);
+      const payload = await buildCooperativePayload(
+        req.district, seasonParam, parsed.value, chosen.scenario,
+      );
       payload.persistence.overrideCount = Object.keys(parsed.value).length;
       return res.json(payload);
     } catch (err) {
@@ -473,10 +618,42 @@ app.get('/api/ledger', rateLimit('expensive'), async (req, res, next) => {
     const seasonParam = parseSeason(req, res);
     if (seasonParam === null) return;
 
+    const chosen = readScenario(req, res);
+    if (chosen.failed) return;
+
+    // F14: in replay mode the ledger follows the active mode — it settles the ONE
+    // district and window the scenario names, rather than mixing a historic
+    // trigger with today's live districts. The labelling travels in the header,
+    // so the body stays exactly the bare LedgerEntry array §18.4 specifies while
+    // still stating which mode produced it.
+    if (chosen.scenario) {
+      const scenario = chosen.scenario;
+      if (seasonParam && seasonParam !== scenario.season) {
+        return res.status(400).json({ error: 'Season conflicts with the scenario.' });
+      }
+      const result = await computeDistrictCached(scenario.districtId, scenario.season, scenario);
+      const entries = settlementLedger.buildLedger([result], { scenario });
+      // Header values must be latin1-encodable, so the ASCII form states the
+      // district, the exact period and the id — the label itself (with its em
+      // dash) rides in the weather/cooperative bodies instead.
+      res.setHeader('X-Ledger-Label',
+        `Demo Settlement Log - Simulated, not real transactions - historic replay: `
+        + `${scenario.districtName}, ${scenario.period.from} to ${scenario.period.to} (${scenario.id})`);
+      if (entries.length === 0) {
+        res.setHeader('X-Ledger-Note',
+          `No payout trigger in the replayed window ${scenario.period.from} to ${scenario.period.to}.`);
+      }
+      return res.json(entries);
+    }
+
     const results = await computeAllDistricts(seasonParam);
     const entries = settlementLedger.buildLedger(results);
 
     res.setHeader('X-Ledger-Label', 'Demo Settlement Log - Simulated, not real transactions');
+    // §27: an empty ledger explains itself rather than looking broken.
+    if (entries.length === 0) {
+      res.setHeader('X-Ledger-Note', 'No district is currently meeting a payout trigger.');
+    }
     return res.json(entries);
   } catch (err) {
     return next(err);

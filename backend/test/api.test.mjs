@@ -99,8 +99,47 @@ function stubDegraded(districtId) {
   };
 }
 
-engine.computeDistrictWeather = async (districtId) =>
-  (districtId === 'bikaner' ? stubDegraded(districtId) : stubLive(districtId));
+/**
+ * What the engine returns for a scenario (§10.2 F14): same shape, the anchor day
+ * and the scenario id in the canonical input, archive provenance. Mirrored from
+ * the real engine so these tests can pin the ROUTE's contract, including that the
+ * scenario id reaches the published receipt.
+ */
+function stubScenario(districtId, scenario) {
+  const base = stubLive(districtId);
+  const input = {
+    ...base.engineInput,
+    date: scenario.anchorDate,
+    season: scenario.season,
+    scenarioId: scenario.id,
+    currentSoilMoistureSource: 'era5_land_reanalysis',
+  };
+  const receipt = ksReceipt(input);
+  return {
+    ...base,
+    season: scenario.season,
+    seasonSource: 'scenario',
+    seasonDate: scenario.anchorDate,
+    sources: { openMeteoArchive: 'LIVE', nasaPower: 'LIVE' },
+    sourceLabels: {
+      currentSoilMoisture: 'ERA5-Land reanalysis (0–7 cm), daily mean on the anchor date — historic replay',
+      historicalSoilMoisture: 'ERA5-Land reanalysis (0–7 cm)',
+    },
+    engineInput: input,
+    engineOutput: ksCompute(input),
+    receipt: {
+      receiptId: receipt.digest,
+      algorithm: 'sha256',
+      canonicalEncoding: 'scaled-int-v1',
+      canonicalInput: receipt.canonicalString,
+    },
+  };
+}
+
+engine.computeDistrictWeather = async (districtId, options = {}) => {
+  if (options.scenario) return stubScenario(districtId, options.scenario);
+  return districtId === 'bikaner' ? stubDegraded(districtId) : stubLive(districtId);
+};
 
 const app = require('../server.js');
 const core = await import('../core/ks_core.mjs');
@@ -254,6 +293,137 @@ describe('§18.2 GET /api/weather/:district', () => {
     assert.deepEqual(await (await get('/api/weather/nope')).json(), { error: 'District not found.' });
     assert.equal((await get('/api/weather/jalna?season=monsoon')).status, 400);
     assert.equal((await get('/api/weather/JALNA')).status, 200); // key is case-tolerant
+  });
+});
+
+// ── §10.2 F14 Scenario / Replay Mode ────────────────────────────────────────
+describe('§10.2 F14 scenarios', () => {
+  let catalogue;
+  let jalnaScenario;
+
+  before(async () => {
+    catalogue = await (await get('/api/scenarios')).json();
+    jalnaScenario = catalogue.scenarios.find((s) => s.districtId === 'jalna');
+  });
+
+  test('GET /api/scenarios serves the committed catalogue: two per district, eight total', async () => {
+    const res = await get('/api/scenarios');
+    assert.equal(res.status, 200);
+    assert.equal(catalogue.catalogue.source, 'backend/config/scenarios.json'); // data, not code
+    assert.equal(catalogue.catalogue.count, 8);
+    assert.equal(catalogue.scenarios.length, 8);
+    assert.match(catalogue.catalogue.rule, /highest-WSI/);
+    assert.match(catalogue.catalogue.derivedFrom.source, /NASA POWER/);
+
+    const perDistrict = {};
+    for (const s of catalogue.scenarios) {
+      assert.match(s.id, /^[a-z]+-(kharif|rabi)-\d{4}$/);
+      assert.equal(s.id, `${s.districtId}-${s.season}-${s.year}`); // §10.2 F14 id form
+      assert.match(s.anchorDate, /^\d{4}-\d{2}-\d{2}$/);
+      assert.ok(s.period.from <= s.anchorDate && s.anchorDate <= s.period.to, s.id);
+      assert.equal(typeof s.label, 'string');
+      assert.equal(typeof s.trigger, 'boolean');
+      assert.equal(typeof s.selection.peakWsi, 'number');
+      perDistrict[s.districtId] = (perDistrict[s.districtId] || 0) + 1;
+    }
+    // The list is NEVER empty for any district — that is the point of F14.
+    assert.deepEqual(perDistrict, { jalna: 2, bikaner: 2, dewas: 2, anantapur: 2 });
+    assert.equal(new Set(catalogue.scenarios.map((s) => s.id)).size, 8);
+    assert.ok(jalnaScenario);
+  });
+
+  test('an unknown or foreign scenario id is refused before anything computes', async () => {
+    assert.equal((await get('/api/weather/jalna?scenario=nope')).status, 400);   // wrong form
+    assert.equal((await get('/api/weather/jalna?scenario=jalna-kharif-1999')).status, 404); // not in the catalogue
+    assert.equal((await get('/api/cooperatives/jalna?scenario=jalna-kharif-1999')).status, 404);
+
+    const other = jalnaScenario.districtId === 'jalna' ? 'bikaner' : 'jalna';
+    const res = await get(`/api/weather/${other}?scenario=${jalnaScenario.id}`);
+    assert.equal(res.status, 400);
+    assert.match((await res.json()).error, /does not match/);
+  });
+
+  test('a replay is the §18.2 shape plus an unmistakable historic label (§19.6)', async () => {
+    const s = jalnaScenario;
+    const body = await (await get(`/api/weather/jalna?scenario=${s.id}`)).json();
+
+    assert.equal(body.mode, 'scenario');
+    assert.equal(body.scenario.id, s.id);
+    assert.equal(body.scenario.isReplay, true);
+    assert.equal(body.scenario.autoRefreshSuspended, true);   // §19.5
+    assert.equal(body.date, s.anchorDate);
+    assert.equal(body.season, s.season);
+    assert.equal(body.seasonSource, 'scenario');
+    assert.match(body.scenario.banner, /Historic replay/);
+    assert.match(body.scenario.banner, /not current conditions/);
+    assert.ok(body.scenario.label.includes(s.districtName));
+    // The exact archive range read: 56 days ending on the anchor (§12.3 window)
+    const from = new Date(Date.parse(`${s.anchorDate}T00:00:00Z`) - 55 * 86400000)
+      .toISOString().slice(0, 10);
+    assert.deepEqual(body.scenario.dataWindow, { from, to: s.anchorDate });
+    assert.match(body.parametricDeficitEngine.dataSource, /HISTORIC REPLAY/);
+
+    // §11.2 — the id is IN the published canonical input, so this receipt cannot
+    // collide with a live receipt for the same district and date (F14).
+    const canonical = JSON.parse(body.receipt.canonicalInput);
+    assert.equal(canonical.scenarioId, s.id);
+    assert.equal(canonical.date, s.anchorDate);
+
+    const live = await (await get('/api/weather/jalna')).json();
+    assert.equal(live.mode, 'live');
+    assert.equal(live.scenario, null);
+    assert.equal(JSON.parse(live.receipt.canonicalInput).scenarioId, null);
+    assert.notEqual(live.receipt.receiptId, body.receipt.receiptId);
+  });
+
+  test('the season cannot contradict the scenario (§15.2)', async () => {
+    const s = jalnaScenario;
+    const conflict = s.season === 'kharif' ? 'rabi' : 'kharif';
+    assert.equal((await get(`/api/weather/jalna?scenario=${s.id}&season=${conflict}`)).status, 400);
+    assert.equal((await get(`/api/ledger?scenario=${s.id}&season=${conflict}`)).status, 400);
+  });
+
+  test('the ledger follows the active mode and says so in its label (§19.2)', async () => {
+    const s = jalnaScenario;
+    const res = await get(`/api/ledger?scenario=${s.id}`);
+    assert.equal(res.status, 200);
+    const label = res.headers.get('x-ledger-label') || '';
+    assert.match(label, /Simulated/);
+    assert.match(label, /historic replay/);
+    assert.ok(label.includes(s.id), `${label} should name ${s.id}`);
+    assert.ok(label.includes(s.districtName), `${label} should name ${s.districtName}`);
+    assert.equal(label.includes('—'), false); // headers are latin1; labels stay ASCII
+
+    const entries = await res.json();
+    assert.ok(Array.isArray(entries));
+    // Only the district the scenario names can settle in a replay — a live
+    // district's trigger must never appear inside a historic replay.
+    for (const e of entries) assert.match(e.cooperative, /Jalna/);
+    if (entries.length === 0) {
+      // §27: an empty ledger explains itself rather than looking broken.
+      assert.match(res.headers.get('x-ledger-note') || '', /No payout trigger/);
+    }
+
+    const live = await get('/api/ledger');
+    assert.equal((live.headers.get('x-ledger-label') || '').includes('historic replay'), false);
+  });
+
+  test('the cooperative aggregation follows the active mode (F14)', async () => {
+    const s = jalnaScenario;
+    const body = await (await get(`/api/cooperatives/jalna?scenario=${s.id}`)).json();
+    assert.equal(body.mode, 'scenario');
+    assert.equal(body.scenario.id, s.id);
+    assert.equal(body.date, s.anchorDate);
+    assert.equal(body.members.length, 25);
+    assert.equal(body.aggregate.currency, 'INR');
+    // A hectare edit still works in replay mode: the roster is the committed file
+    // and the assessment comes from the replayed tier (§18.7, §16.3).
+    const ref = body.members[0].memberRef;
+    const posted = await (await post(`/api/cooperatives/jalna?scenario=${s.id}`,
+      { overrides: { [ref]: 5 } })).json();
+    assert.equal(posted.persistence.overrideCount, 1);
+    assert.equal(posted.members.find((m) => m.memberRef === ref).effectiveHectares, 5);
+    assert.equal(posted.scenario.id, s.id);
   });
 });
 

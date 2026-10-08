@@ -433,6 +433,122 @@ describe('§12.4 snapshot seeding and §12.5 emergency fallback', () => {
   });
 });
 
+// ── Layer 7 — F14 scenario mode (§10.2 F14) ─────────────────────────────────
+// A replay is the IDENTICAL engine over a real archived window: same core, same
+// assembly, same receipt — a different date and a different source of the same
+// numbers. What changes is provenance, and provenance is exactly what these
+// tests pin down.
+const SCENARIO = {
+  id: 'jalna-kharif-2015',
+  districtId: 'jalna',
+  districtName: 'Jalna',
+  season: 'kharif',
+  year: 2015,
+  label: 'Jalna — September 2015',
+  period: { from: '2015-09-01', to: '2015-09-30' },
+  anchorDate: '2015-09-12',
+  trigger: true,
+  selection: {
+    basis: 'a triggering window in the F11 hindcast, chosen by peak WSI',
+    peakWsi: 100,
+    payoutTier: 'TIER_3_CATASTROPHIC',
+    payoutPerHectare: 50000,
+    durationMode: 'estimated',
+    source: 'NASA POWER daily PRECTOTCORR — 2006-2025 (F11 hindcast)',
+  },
+};
+
+/** deps shaped like the archived window a replay reads: 56 days to the anchor. */
+function scenarioDeps({ precipMm = 0.2, soil = 0.12, noWindow = false, noAnchorSoil = false } = {}) {
+  const anchor = SCENARIO.anchorDate;
+  const dates = Array.from({ length: 56 }, (_, i) => addDays(anchor, i - 55));
+  return {
+    fetchForecast: async () => {
+      if (noWindow) throw new Error('archive window unavailable');
+      if (noAnchorSoil) throw new Error(`no soil moisture on the anchor date ${anchor}`);
+      return {
+        daily: dates.map((date) => ({ date, precipMm })),
+        currentSoilMoisture: soil,
+        currentSoilMoistureTime: `${anchor} (ERA5-Land daily mean, 0–7 cm)`,
+        currentPrecipMm: precipMm,
+        hourlySoil: [], // no forecast-model series exists for a historic date
+      };
+    },
+    fetchArchiveSoil: async () => {
+      if (noWindow) throw new Error('archive window unavailable');
+      return { daily: dates.map((date) => ({ date, soilMoisture: soil })), hoursPerDay: 24 };
+    },
+  };
+}
+
+describe('§22.1 layer 7 — F14 scenario mode', () => {
+  test('replays the anchor day from the archived series and labels every source', async () => {
+    const r = await engine.computeDistrictWeather('jalna', { scenario: SCENARIO, deps: scenarioDeps() });
+    assert.equal(r.degraded, false);
+    assert.equal(r.seasonDate, SCENARIO.anchorDate);
+    assert.equal(r.season, 'kharif');
+    assert.equal(r.seasonSource, 'scenario'); // not 'auto', not 'user'
+
+    // §11.2 — the id and the TRUE source of the current soil value are in the input
+    assert.equal(r.engineInput.scenarioId, 'jalna-kharif-2015');
+    assert.equal(r.engineInput.date, '2015-09-12');
+    assert.equal(r.engineInput.currentSoilMoistureSource, 'era5_land_reanalysis');
+    assert.equal(r.engineInput.historicalSoilMoistureSource, 'era5_land_reanalysis');
+
+    // §11.8 — a replay reports the sources it actually used: the Forecast API
+    // never ran, so it is named by neither LIVE nor FALLBACK.
+    assert.deepEqual(r.sources, { openMeteoArchive: 'LIVE', nasaPower: 'LIVE' });
+    assert.equal(r.dataQuality, 'LIVE');
+    assert.match(r.sourceLabels.currentSoilMoisture, /historic replay/);
+
+    // §19.3 — every trend point names its source, and point 0 is archive too
+    assert.equal(r.cwsiTrendPoints.length, 5);
+    for (const p of r.cwsiTrendPoints) assert.match(p.source, /era5_land_reanalysis/);
+
+    // The core, unchanged, decides everything downstream of the input (§14.2)
+    assert.deepEqual(r.engineOutput, ksCompute(r.engineInput));
+  });
+
+  test('a scenario receipt can never collide with a live one (F14, §11.2)', async () => {
+    const live = await engine.computeDistrictWeather('jalna', {
+      date: SCENARIO.anchorDate, season: 'kharif', deps: scenarioDeps(),
+    });
+    const replay = await engine.computeDistrictWeather('jalna', { scenario: SCENARIO, deps: scenarioDeps() });
+
+    assert.equal(JSON.parse(replay.receipt.canonicalInput).scenarioId, 'jalna-kharif-2015');
+    assert.equal(JSON.parse(live.receipt.canonicalInput).scenarioId, null);
+    assert.notEqual(live.receipt.receiptId, replay.receipt.receiptId);
+    // …and the digest still recomputes from the published string (§10.2 F10)
+    const independent = createHash('sha256').update(replay.receipt.canonicalInput, 'utf8').digest('hex');
+    assert.equal(independent, replay.receipt.receiptId);
+  });
+
+  test('an archive that cannot serve the window degrades instead of substituting', async () => {
+    const r = await engine.computeDistrictWeather('jalna', { scenario: SCENARIO, deps: scenarioDeps({ noWindow: true }) });
+    assert.equal(r.degraded, true);
+    assert.equal(r.engineOutput, null);
+    assert.equal(r.receipt, null);
+    assert.equal(r.actual30Mm, null);           // never a substituted zero
+    assert.equal(r.dataQuality, 'PARTIAL');      // the committed baseline is still real
+    assert.equal(r.sources.openMeteoArchive, 'FALLBACK');
+    assert.match(r.fallbackReasons.join(' '), /scenario replay series \(Open-Meteo archive\)/);
+  });
+
+  test('a missing anchor-day soil value is a data failure, not a guess (§15.6)', async () => {
+    const r = await engine.computeDistrictWeather('jalna', { scenario: SCENARIO, deps: scenarioDeps({ noAnchorSoil: true }) });
+    assert.equal(r.degraded, true);
+    assert.equal(r.sources.openMeteoArchive, 'FALLBACK');
+    assert.match(r.fallbackReasons.join(' '), /anchor date/);
+  });
+
+  test('a scenario without an id or anchor date is refused outright', async () => {
+    await assert.rejects(
+      () => engine.computeDistrictWeather('jalna', { scenario: { id: 'x', season: 'kharif' }, deps: scenarioDeps() }),
+      TypeError,
+    );
+  });
+});
+
 // ── small shared helpers ───────────────────────────────────────────────────
 describe('engine clock and calendar helpers', () => {
   test('the season-day is the IST day, not the UTC day (§11.9)', () => {

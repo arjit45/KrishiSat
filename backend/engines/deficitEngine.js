@@ -23,6 +23,7 @@ const { getDistrict, toPublicDistrict } = require('../config/districts');
 const { loadCore, getCropStage, resolveSeason } = require('./phenology');
 const climateCache = require('./climateCache');
 const { fetchForecast, fetchArchiveSoil, forecastSoilMeanForDate, HISTORY_DAYS } = require('../services/openMeteo');
+const scenarioService = require('../services/scenario');
 
 // §13.1: ERA5-Land updates daily with a ~5-day delay, so the duration soil leg is
 // only "real" when the whole window it counts over is present (§12.3).
@@ -138,12 +139,17 @@ function evaluateDuration({ dates, precipByDate, soilByDate, expectedDaily, fiel
 
 /**
  * §10.1 F4 — five CWSI points: four weekly ERA5-Land daily means plus the current
- * forecast-model value. Days missing from the archive (the normal 5-day lag) are
+ * value. Days missing from the archive (the normal 5-day lag) are
  * spliced from the Forecast API's own series and the affected dates are reported;
  * a point that can be sourced from neither is truncated and reported (§13.1).
+ *
+ * `currentSource` is `forecast_model` on the live path. A scenario replay (§10.2
+ * F14) has no forecast-model value for a date years ago, so its "current" point
+ * is the ERA5-Land daily mean on the anchor date — labelled as what it is, since
+ * §19.3 requires each point's source to be named.
  */
 function buildCwsiTrend(core, { today, fieldCapacity, wiltingPoint, soilByDate,
-  currentSoilMoisture, forecastHourlySoil }) {
+  currentSoilMoisture, forecastHourlySoil, currentSource = 'forecast_model' }) {
   const points = [];
   const splicedDates = [];
   const truncatedDates = [];
@@ -154,7 +160,7 @@ function buildCwsiTrend(core, { today, fieldCapacity, wiltingPoint, soilByDate,
     let source;
     if (offset === 0) {
       value = currentSoilMoisture;
-      source = 'forecast_model';
+      source = currentSource;
     } else if (soilByDate.has(date)) {
       value = soilByDate.get(date);
       source = 'era5_land_reanalysis';
@@ -198,20 +204,39 @@ function aggregateQuality(qualities) {
  *
  * @param {string} districtId registry key (§11.1)
  * @param {{date?:string, season?:'kharif'|'rabi', now?:Date, scenarioId?:string|null,
+ *   scenario?:{id:string,anchorDate:string,season:string}|null,
  *   deps?:{fetchForecast?:Function, fetchArchiveSoil?:Function}}} [options]
  *   `deps` exists for §22.1 layer 7 (integration tests with mocked externals) and
  *   for nothing else; production callers pass nothing and get the real services.
+ *   `scenario` (§10.2 F14) switches the date to the catalogue's anchor day and
+ *   the data source to that window's archived series — everything downstream of
+ *   the canonical input is unchanged, because it is the identical engine.
  */
 async function computeDistrictWeather(districtId, options = {}) {
   const district = getDistrict(districtId);
   if (!district) throw new RangeError(`unknown district "${districtId}"`);
+
+  const scenario = options.scenario || null;
+  if (scenario && (typeof scenario.id !== 'string' || typeof scenario.anchorDate !== 'string')) {
+    throw new TypeError('scenario must carry an id and an anchorDate');
+  }
+
   const deps = options.deps || {};
-  const fetchForecastImpl = deps.fetchForecast || fetchForecast;
-  const fetchArchiveSoilImpl = deps.fetchArchiveSoil || fetchArchiveSoil;
+  // A replay has no forecast-model series for its date, so its two slots are
+  // served by the archived window; injected deps still win in both modes.
+  const defaultDeps = scenario
+    ? scenarioService.depsFor(scenario, district)
+    : { fetchForecast, fetchArchiveSoil };
+  const fetchForecastImpl = deps.fetchForecast || defaultDeps.fetchForecast;
+  const fetchArchiveSoilImpl = deps.fetchArchiveSoil || defaultDeps.fetchArchiveSoil;
 
   const core = await loadCore();
-  const today = options.date || istToday(options.now);
-  const { season, seasonSource } = await resolveSeason(today, options.season);
+  const today = scenario ? scenario.anchorDate : (options.date || istToday(options.now));
+  const resolved = await resolveSeason(today, scenario ? scenario.season : options.season);
+  const season = resolved.season;
+  // `scenario` is a third seasonSource: the season came from the committed
+  // catalogue entry, not from the calendar (auto) and not from the caller (user).
+  const seasonSource = scenario ? 'scenario' : resolved.seasonSource;
   const cropStage = await getCropStage(district.id, today, season);
   const baselines = climateCache.getMonthBaselines(district.id, today);
 
@@ -228,17 +253,36 @@ async function computeDistrictWeather(districtId, options = {}) {
   const forecast = forecastResult.status === 'fulfilled' ? forecastResult.value : null;
   const archive = archiveResult.status === 'fulfilled' ? archiveResult.value : null;
   const fallbackReasons = [];
-  if (!forecast) fallbackReasons.push(`Open-Meteo forecast: ${forecastResult.reason.message}`);
-  if (!archive) fallbackReasons.push(`Open-Meteo archive: ${archiveResult.reason.message}`);
+  if (!forecast) {
+    fallbackReasons.push(scenario
+      ? `scenario replay series (Open-Meteo archive): ${forecastResult.reason.message}`
+      : `Open-Meteo forecast: ${forecastResult.reason.message}`);
+  }
+  if (!archive) {
+    fallbackReasons.push(scenario
+      ? `scenario replay soil series (Open-Meteo archive): ${archiveResult.reason.message}`
+      : `Open-Meteo archive: ${archiveResult.reason.message}`);
+  }
   if (baselines.source === 'fallback') {
     fallbackReasons.push(`NASA POWER baseline: using ${baselines.sourceLabel}`);
   }
 
-  const qualities = {
-    openMeteoForecast: forecast ? 'LIVE' : 'FALLBACK',
-    openMeteoArchive: archive ? 'LIVE' : 'FALLBACK',
-    nasaPower: baselines.source === 'snapshot' ? 'LIVE' : 'FALLBACK',
-  };
+  // §11.8: a SourceQuality names one external source (or one input value). On the
+  // live path three sources are consulted; in a replay the Forecast API is never
+  // called at all — listing it would be a lie in either direction (it did not
+  // succeed, and it did not fail), so the replay reports the two sources it
+  // actually used. Every Open-Meteo input in a replay comes from the one Archive
+  // window, so if any of them is missing that source did not deliver → FALLBACK.
+  const qualities = scenario
+    ? {
+      openMeteoArchive: forecast && archive ? 'LIVE' : 'FALLBACK',
+      nasaPower: baselines.source === 'snapshot' ? 'LIVE' : 'FALLBACK',
+    }
+    : {
+      openMeteoForecast: forecast ? 'LIVE' : 'FALLBACK',
+      openMeteoArchive: archive ? 'LIVE' : 'FALLBACK',
+      nasaPower: baselines.source === 'snapshot' ? 'LIVE' : 'FALLBACK',
+    };
   const dataQuality = aggregateQuality(qualities);
 
   const base = {
@@ -264,10 +308,15 @@ async function computeDistrictWeather(districtId, options = {}) {
     fallbackReasons,
     dataQuality,
     seasonDate: today,
-    sourceLabels: {
-      currentSoilMoisture: 'Open-Meteo forecast model (ICON/IFS), 3–9 cm',
-      historicalSoilMoisture: 'ERA5-Land reanalysis (0–7 cm)',
-    },
+    sourceLabels: scenario
+      ? {
+        currentSoilMoisture: 'ERA5-Land reanalysis (0–7 cm), daily mean on the anchor date — historic replay',
+        historicalSoilMoisture: 'ERA5-Land reanalysis (0–7 cm)',
+      }
+      : {
+        currentSoilMoisture: 'Open-Meteo forecast model (ICON/IFS), 3–9 cm',
+        historicalSoilMoisture: 'ERA5-Land reanalysis (0–7 cm)',
+      },
   };
 
   // ── Degraded path: no precipitation series ⇒ no shortfall is computable ──
@@ -320,13 +369,21 @@ async function computeDistrictWeather(districtId, options = {}) {
     districtId: district.id,
     season,
     date: today,
-    scenarioId: options.scenarioId === undefined ? null : options.scenarioId,
+    // F14, §11.2: `scenarioId` is part of the canonical input, so a scenario
+    // receipt can never collide with a live receipt for the same district and date.
+    scenarioId: scenario
+      ? scenario.id
+      : (options.scenarioId === undefined ? null : options.scenarioId),
     baselineMonthlyMm: mm3(baselines.baselineMonthlyMm),
     baselinePrevMonthMm: mm3(baselines.baselinePrevMonthMm),
     expected30Mm,
     actual30Mm,
     currentSoilMoisture: frac6(forecast.currentSoilMoisture),
-    currentSoilMoistureSource: 'forecast_model',
+    // §11.2 fixes `forecast_model` for the live path. A replay has no forecast
+    // model for a date years ago: its current point is the ERA5-Land daily mean
+    // on the anchor date, and the input says so rather than inheriting a label
+    // that would name a source which never ran.
+    currentSoilMoistureSource: scenario ? 'era5_land_reanalysis' : 'forecast_model',
     historicalSoilMoistureSource: 'era5_land_reanalysis',
     fieldCapacity: frac6(district.fieldCapacity),
     wiltingPoint: frac6(district.wiltingPoint),
@@ -353,6 +410,7 @@ async function computeDistrictWeather(districtId, options = {}) {
     soilByDate,
     currentSoilMoisture: engineInput.currentSoilMoisture,
     forecastHourlySoil: forecast.hourlySoil,
+    currentSource: scenario ? 'era5_land_reanalysis' : 'forecast_model',
   });
 
   const receipt = core.ksReceipt(engineInput);

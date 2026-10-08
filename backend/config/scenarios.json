@@ -1,0 +1,214 @@
+{
+  "version": 1,
+  "builtAt": "2026-10-08T17:26:25.855Z",
+  "rule": "two scenarios per district (eight total): the two highest-WSI windows in which the F11 hindcast shows a trigger; where a district has fewer than two, its highest-deficit window fills the gap and is labelled a non-trigger",
+  "derivedFrom": {
+    "file": "backend/config/hindcast.json",
+    "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC)",
+    "period": "2006-2025",
+    "generatedAt": "2026-10-08T13:59:03.435Z",
+    "note": "the catalogue is selected from the hindcast; each replay itself runs on Open-Meteo Archive data, a different reanalysis (§28.8)"
+  },
+  "scenarios": [
+    {
+      "id": "jalna-rabi-2025",
+      "districtId": "jalna",
+      "districtName": "Jalna",
+      "state": "Maharashtra",
+      "season": "rabi",
+      "year": 2025,
+      "label": "Jalna — December 2024",
+      "period": {
+        "from": "2024-12-01",
+        "to": "2024-12-31"
+      },
+      "anchorDate": "2024-12-01",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 100,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "jalna-rabi-2024",
+      "districtId": "jalna",
+      "districtName": "Jalna",
+      "state": "Maharashtra",
+      "season": "rabi",
+      "year": 2024,
+      "label": "Jalna — December 2023",
+      "period": {
+        "from": "2023-12-01",
+        "to": "2023-12-31"
+      },
+      "anchorDate": "2023-12-31",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 98.95,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "bikaner-kharif-2025",
+      "districtId": "bikaner",
+      "districtName": "Bikaner",
+      "state": "Rajasthan",
+      "season": "kharif",
+      "year": 2025,
+      "label": "Bikaner — June 2025",
+      "period": {
+        "from": "2025-06-01",
+        "to": "2025-06-30"
+      },
+      "anchorDate": "2025-06-09",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 50.56,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "bikaner-rabi-2025",
+      "districtId": "bikaner",
+      "districtName": "Bikaner",
+      "state": "Rajasthan",
+      "season": "rabi",
+      "year": 2025,
+      "label": "Bikaner — December 2024",
+      "period": {
+        "from": "2024-12-01",
+        "to": "2024-12-31"
+      },
+      "anchorDate": "2024-12-01",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 100,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "dewas-rabi-2025",
+      "districtId": "dewas",
+      "districtName": "Dewas",
+      "state": "Madhya Pradesh",
+      "season": "rabi",
+      "year": 2025,
+      "label": "Dewas — December 2024",
+      "period": {
+        "from": "2024-12-01",
+        "to": "2024-12-31"
+      },
+      "anchorDate": "2024-12-01",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 100,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "dewas-kharif-2024",
+      "districtId": "dewas",
+      "districtName": "Dewas",
+      "state": "Madhya Pradesh",
+      "season": "kharif",
+      "year": 2024,
+      "label": "Dewas — June 2024",
+      "period": {
+        "from": "2024-06-01",
+        "to": "2024-06-30"
+      },
+      "anchorDate": "2024-06-01",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 53.15,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "anantapur-kharif-2025",
+      "districtId": "anantapur",
+      "districtName": "Anantapur",
+      "state": "Andhra Pradesh",
+      "season": "kharif",
+      "year": 2025,
+      "label": "Anantapur — June 2025",
+      "period": {
+        "from": "2025-06-01",
+        "to": "2025-06-30"
+      },
+      "anchorDate": "2025-06-29",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 50.26,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    },
+    {
+      "id": "anantapur-rabi-2025",
+      "districtId": "anantapur",
+      "districtName": "Anantapur",
+      "state": "Andhra Pradesh",
+      "season": "rabi",
+      "year": 2025,
+      "label": "Anantapur — January 2025",
+      "period": {
+        "from": "2025-01-01",
+        "to": "2025-01-31"
+      },
+      "anchorDate": "2025-01-26",
+      "trigger": true,
+      "selection": {
+        "basis": "a triggering window in the F11 hindcast, chosen by peak WSI",
+        "peakWsi": 100,
+        "payoutTier": "TIER_3_CATASTROPHIC",
+        "payoutPerHectare": 50000,
+        "severityLevel": "CATASTROPHIC_DROUGHT",
+        "rainfallShortfallPercentage": 75.27,
+        "durationMode": "estimated",
+        "source": "NASA POWER daily PRECTOTCORR (community AG, time-standard=UTC) — 2006-2025 (F11 hindcast)"
+      }
+    }
+  ]
+}
