@@ -1,7 +1,7 @@
 # KrishiSat — parametric crop-insurance decision support
 
-A parametric agricultural-insurance decision-support and oracle platform for Indian
-smallholder farming cooperatives. It converts freely available weather and soil telemetry
+A parametric agricultural-insurance decision-support platform for Indian
+smallholder farming cooperatives. It converts freely available weather and soil data
 into a transparent, deterministic drought-severity index and a tiered payout
 recommendation that contains no human discretion.
 
