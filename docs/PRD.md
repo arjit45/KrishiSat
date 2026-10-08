@@ -916,6 +916,20 @@ BacktestRecord {
   tier: string,
   payoutPerHectare: number,
   durationWeeks: number,
+  // Disclosures, added in v1.4 because the replay's source cannot support more.
+  // The hindcast runs on NASA POWER DAILY precipitation, which carries no soil
+  // series, so the §12.3 soil leg cannot be tested: durationMode is always
+  // "estimated" (the OR-clauses are therefore disabled) and soilLeg is
+  // "unavailable_in_hindcast_source". The assumed soil value changes no tier,
+  // because in this mode the tier is WSI-decided. peakDate, severityLevel and
+  // rainfallShortfallPercentage are recorded for the audit trail.
+  peakDate: string,
+  durationMode: "real" | "estimated",
+  severityLevel: string,
+  soilLeg: string,
+  rainfallShortfallPercentage: number,
+  evaluatedDays: number,
+  skippedDays: number,
 }
 BacktestSummary {
   districtId: string,
@@ -923,6 +937,10 @@ BacktestSummary {
   triggerFrequency: number,     // seasons that triggered / total seasons
   tierCounts: Record<string, number>,
   cumulativePayoutPerHectare: number,
+  triggerBand: [number, number],       // §24: measured frequency ±15 pp, clamped 0–100
+  peakWsiStats: object,                // min / p25 / median / p75 / max, so a headline is checkable
+  triggerFrequencyAtLeastTier: object, // frequency of reaching each tier or higher
+  bySeason: object,                    // kharif and rabi kept separate — the two are not comparable
   records: BacktestRecord[],
 }
 ```
@@ -1173,7 +1191,30 @@ appear in product copy (§1.5).
 | Vercel Hobby cron frequency — **official sources conflict** | Vercel usage-and-pricing page (once per day) vs. Vercel changelog (any interval, all plans) | Oct 2026 |
 | Field capacity / wilting point as texture-class typical values (§12.2) | Published soil-water ranges, e.g. Cornell NRCCA (FC ≈15–25% sandy, ≈35–45% loam, ≈45–55% clay) and Oklahoma State Extension (PWP ≈7% sandy → ≈24% clay) | Oct 2026 |
 | Trigger-frequency plausibility bands (§22.1, §24) | **Rule locked in v1.3** — first-hindcast frequency ±15 pp. The per-district number is recorded when the hindcast first runs. | Oct 2026 (rule) |
+| **Hindcast trigger frequency**, per district (§11.6 definition: a season-year triggers when its season *peak* reaches any tier) | **First hindcast — MEASURED**, `backend/config/hindcast.json`, NASA POWER daily PRECTOTCORR (`time-standard=UTC`), 2006–2025, 40 season-years per district: **jalna 100% · bikaner 100% · dewas 100% · anantapur 100%**. Band rule now yields [85, 100] for each. | Oct 2026 (run) |
+| **Hindcast peak-WSI distribution** | Same snapshot: median peak WSI = **100** in all four districts; jalna kharif min 60.7 · anantapur kharif min 58.3 · bikaner min 100 (Kharif and Rabi both). The index saturates at its clamp rather than sitting just above a threshold. | Oct 2026 (run) |
+| **Open finding — the index saturates in the transition months** | **Recorded, NOT resolved.** See the note below §12.6. No threshold was changed by this run: a measurement is not a licence to re-tune a locked parameter (§29.4). | Oct 2026 (run) |
 | *(crop-insurance statistics)* | **not yet registered — must not be quoted** | — |
+
+**Finding from the first hindcast (Oct 2026) — recorded, not resolved.** Every district's
+season *peak* WSI reaches a tier in every one of 40 season-years, and the median peak is the
+clamp value 100 rather than a marginal 36. The driver is structural, not a random sample: the
+trailing-30-day expectation keeps carrying monsoon-scale rainfall (jalna: 161 mm for September,
+61 mm for October) after the rain has stopped, so a window that straddles the withdrawal
+reports a 90–100% shortfall, and the §12.2 multiplier (Grain Filling 1.6×, Sowing 2.0×) pushes
+WSI to the clamp. Rabi is worse and for a different reason — jalna's December–February
+baselines are 5.6 / 3.4 / 3.1 mm, so a **percentage** shortfall there is near 100% for an
+absolute deficit of a few millimetres.
+
+Two consequences, both recorded rather than acted on:
+
+1. The §11.6 headline number describes the season **peak**, not the product's per-decision
+   behaviour. It must not be quoted as a probability of payout on any given day (§24).
+2. Whether the locked §F1 comparison (a ratio, against a monthly baseline, weighted by a
+   growing-stage multiplier) is the right instrument for withdrawal months and for dry-season
+   Rabi is now an **open product question**. Changing §F1 or §12.2 is a PRD decision with a
+   version bump; this run does not change either, and the crop-stage multipliers stay
+   `[WORKING]` because a trigger *frequency* is not evidence about an agronomic multiplier.
 
 ---
 
@@ -1858,7 +1899,8 @@ real archive data, not current conditions; the receipt carries the scenario id (
 backend/
 ├── server.js                 # Express app, routes, wiring
 ├── scripts/
-│   └── fetch-baseline.js  # build-time NASA POWER climatology refresh (§12.4); never on a request path
+│   ├── fetch-baseline.js  # build-time NASA POWER climatology refresh (§12.4); never on a request path
+│   └── run-hindcast.js    # build-time F11 replay over NASA POWER daily data → config/hindcast.json
 ├── test/
 │   ├── core.test.mjs      # §22.1 layers 1–5 against the committed core
 │   ├── engine.test.mjs    # §22.1 layers 1 & 7 — duration, quality ladder, mocked externals
@@ -2125,7 +2167,7 @@ Duration OR-clauses are disabled whenever duration is estimated (§12.3).
 | Label compliance | 0 forbidden labels (§19.2) in shipped UI |
 | Degradation correctness | 100% of fallback inputs visibly marked |
 | Determinism | 0 flaky determinism tests |
-| Backtest plausibility | Every district's trigger frequency within **±15 percentage points** of the frequency its **first** hindcast measures, recorded in §12.6. Reported in v1.3; enforced as a gate only once that number exists |
+| Backtest plausibility | Every district's trigger frequency within **±15 percentage points** of the frequency its **first** hindcast measured — first run recorded in §12.6 (Oct 2026: 100% for all four, bands [85, 100]). The gate is now enforceable. It is a **stability** gate on the measurement, not a statement that 100% is plausible: the saturation finding in §12.6 is the open item, and no threshold moved to make this metric look better |
 
 ---
 
@@ -2313,8 +2355,14 @@ exists to prevent:
 
 - **Crop-stage multipliers** and the **fallback monthly shape** — unvalidated; gated on the first
   hindcast, and re-taggable only once a source is registered (§12.2, §12.5, §12.6).
-- **Per-district trigger-frequency numbers** — the band *rule* is locked above; each district's
-  measured frequency is written to §12.6 when the hindcast first runs.
+- **Per-district trigger-frequency numbers — CLOSED (Oct 2026).** The first hindcast ran
+  (NASA POWER daily 2006–2025) and every district's measured frequency is recorded in §12.6:
+  100% for all four, with the band rule yielding [85, 100]. The numbers exist; they are not
+  flattering, and §12.6 states why rather than restating them as a result.
+- **Index saturation in withdrawal months and dry-season Rabi — OPEN (Oct 2026).** Surfaced by
+  that same hindcast and recorded in full in §12.6. It is a question about §F1's comparison
+  basis and §12.2's multipliers, so it needs a PRD decision and a version bump — which is why
+  it is written down here instead of being tuned away.
 
 **One platform ambiguity, recorded rather than resolved.** Official Vercel sources currently
 disagree about the Hobby plan's cron frequency (the usage-and-pricing page says once per day; a

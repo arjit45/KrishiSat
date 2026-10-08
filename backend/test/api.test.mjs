@@ -355,11 +355,29 @@ describe('§18.9 GET /api/recommendations', () => {
 
 // ── §18.6 /api/backtest/:district ─────────────────────────────────────────
 describe('§18.6 GET /api/backtest/:district', () => {
-  test('absent hindcast snapshot → 503 with a reason, never invented numbers', async () => {
+  test('serves the committed snapshot with its labelling attached', async () => {
     const res = await get('/api/backtest/jalna');
-    assert.equal(res.status, 503);
+    assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(typeof body.detail, 'string');
+    assert.equal(body.districtId, 'jalna');
+    assert.equal(typeof body.triggerFrequency, 'number');
+    assert.ok(Array.isArray(body.triggerBand) && body.triggerBand.length === 2);
+    assert.ok(Array.isArray(body.records) && body.records.length > 0);
+    assert.ok(body.tierCounts && typeof body.tierCounts === 'object');
+    // §10.2 F11 / §28.8: the disclosure travels with the numbers.
+    assert.match(body.methodology.disclaimer, /NOT a validation against real claim outcomes/);
+    assert.match(body.methodology.hindcastSource, /NASA POWER/);
+    assert.match(body.source, /NASA POWER daily/);
+    assert.equal(body.period, '2006-2025');
+    assert.ok(Date.parse(body.generatedAt) > 0);
+
+    // Every record satisfies the §11.6 shape
+    for (const r of body.records) {
+      for (const key of ['districtId', 'year', 'season', 'peakWsi', 'tier', 'payoutPerHectare', 'durationWeeks']) {
+        assert.ok(key in r, `record missing ${key}`);
+      }
+      assert.equal(r.durationMode, 'estimated'); // disclosed, never implied (§12.3)
+    }
   });
 
   test('unknown district → 404, checked before the snapshot', async () => {

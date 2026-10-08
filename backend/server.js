@@ -35,6 +35,7 @@ const { DISTRICTS, DISTRICT_IDS, getDistrict } = require('./config/districts');
 const climateCache = require('./engines/climateCache');
 const { computeDistrictWeather } = require('./engines/deficitEngine');
 const recommendationLog = require('./services/recommendationLog');
+const hindcast = require('./services/hindcast');
 const { loadCore, CORE_SPECIFIER } = require('./engines/phenology');
 const { securityHeaders, corsAllowlist } = require('./middleware/security');
 const { rateLimit } = require('./middleware/rateLimit');
@@ -362,19 +363,24 @@ app.get('/api/ledger', (req, res) => {
 // path (§9.4). The snapshot does not exist until the F11 hindcast slice runs, so
 // this answers honestly rather than inventing numbers.
 app.get('/api/backtest/:district', rateLimit('normal'), validate.requireDistrict, (req, res) => {
-  const snapshotPath = path.join(__dirname, 'config', 'hindcast.json');
-  let snapshot;
-  try {
-    snapshot = JSON.parse(fs.readFileSync(snapshotPath, 'utf8'));
-  } catch {
+  const summary = hindcast.getSummary(req.district.id);
+  const snapshot = hindcast.readSnapshot();
+  if (!summary || !snapshot) {
     return res.status(503).json({
       error: 'Not available',
-      detail: 'The committed hindcast snapshot (backend/config/hindcast.json, PRD §9.4/F11) has not been generated yet.',
+      detail: 'The committed hindcast snapshot (backend/config/hindcast.json, PRD §9.4/F11) has not been generated yet. Run: cd backend && node scripts/run-hindcast.js',
     });
   }
-  const entry = snapshot[req.district.id];
-  if (!entry) return res.status(404).json({ error: 'District not found.' });
-  return res.json(entry);
+  // §10.2 F11 requires the labelling to travel WITH the numbers: the source is a
+  // different reanalysis than the live view, the soil leg is absent, and this is a
+  // methodology check rather than a validation against claim outcomes (§28.8).
+  return res.json({
+    ...summary,
+    period: snapshot.period,
+    source: snapshot.source,
+    generatedAt: snapshot.generatedAt,
+    methodology: snapshot.methodology,
+  });
 });
 
 // ── GET /ks_core.mjs (§20.1) ────────────────────────────────────────────────
