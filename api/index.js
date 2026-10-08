@@ -9,7 +9,7 @@
  * the deployed handler. That is deliberate: one Express app, one route table,
  * one behaviour — a second copy would be free to drift from the PRD.
  *
- * Routing (see vercel.json): `/api/*` and `/ks_core.wasm` are rewritten here;
+ * Routing (see vercel.json): `/api/*` and `/ks_core.mjs` are rewritten here;
  * everything else falls through to the built frontend.
  */
 module.exports = require('../backend/server.js');

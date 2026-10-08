@@ -2,15 +2,19 @@
   "$schema": "https://openapi.vercel.sh/vercel.json",
   "buildCommand": "npm --prefix frontend install && npm --prefix frontend run build",
   "outputDirectory": "frontend/dist",
+  "regions": ["bom1"],
   "rewrites": [
     { "source": "/api/:path*", "destination": "/api" },
-    { "source": "/ks_core.wasm", "destination": "/api" },
+    { "source": "/ks_core.mjs", "destination": "/api" },
     { "source": "/:path*", "destination": "/index.html" }
   ],
   "headers": [
     {
-      "source": "/ks_core.wasm",
-      "headers": [{ "key": "Content-Type", "value": "application/wasm" }]
+      "source": "/ks_core.mjs",
+      "headers": [
+        { "key": "Content-Type", "value": "text/javascript; charset=utf-8" },
+        { "key": "Cache-Control", "value": "public, max-age=300" }
+      ]
     }
   ],
   "crons": [{ "path": "/api/cron/recommendations", "schedule": "0 1 * * *" }]

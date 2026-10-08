@@ -1,0 +1,111 @@
+{
+  "source": "NASA POWER Climatology API (MERRA-2)",
+  "endpoint": "https://power.larc.nasa.gov/api/temporal/climatology/point",
+  "parameter": "PRECTOTCORR",
+  "community": "AG",
+  "period": "1991-2020",
+  "periodNote": "Passed explicitly as start/end on every request; the API default is undocumented and never relied upon (PRD §13.2).",
+  "units": "mm per calendar month",
+  "conversion": "PRECTOTCORR is returned in mm/day; monthly mm = value × days in a non-leap month (31/28/31/30/31/30/31/31/30/31/30/31) — PRD §13.2.",
+  "monthOrder": [
+    "JAN",
+    "FEB",
+    "MAR",
+    "APR",
+    "MAY",
+    "JUN",
+    "JUL",
+    "AUG",
+    "SEP",
+    "OCT",
+    "NOV",
+    "DEC"
+  ],
+  "timeStandardRequested": "UTC",
+  "timeStandardReported": "UTC",
+  "apiVersion": "v2.10.0",
+  "fetchedAt": "2026-10-08T13:08:22.948Z",
+  "note": "Committed build-time snapshot (PRD §12.4). Read from disk at startup; no request waits on NASA POWER.",
+  "districts": {
+    "jalna": {
+      "lat": 19.8297,
+      "lon": 75.88,
+      "monthlyMm": [
+        3.41,
+        3.08,
+        9.61,
+        5.1,
+        19.22,
+        148.5,
+        173.29,
+        169.26,
+        161.1,
+        61.38,
+        21,
+        5.89
+      ],
+      "annualMm": 780.84,
+      "monsoonMm": 652.15
+    },
+    "bikaner": {
+      "lat": 28.0167,
+      "lon": 73.3119,
+      "monthlyMm": [
+        4.65,
+        8.96,
+        8.06,
+        8.7,
+        17.05,
+        39.3,
+        82.15,
+        57.66,
+        33.3,
+        9.92,
+        3.9,
+        2.79
+      ],
+      "annualMm": 276.44,
+      "monsoonMm": 212.41
+    },
+    "dewas": {
+      "lat": 22.9624,
+      "lon": 76.0507,
+      "monthlyMm": [
+        7.13,
+        5.6,
+        6.82,
+        3.9,
+        12.71,
+        138.3,
+        328.29,
+        284.89,
+        152.7,
+        30.07,
+        10.5,
+        4.65
+      ],
+      "annualMm": 985.56,
+      "monsoonMm": 904.18
+    },
+    "anantapur": {
+      "lat": 14.6819,
+      "lon": 77.6006,
+      "monthlyMm": [
+        3.1,
+        2.8,
+        8.99,
+        25.2,
+        61.38,
+        65.4,
+        71.61,
+        88.97,
+        124.8,
+        105.09,
+        34.8,
+        8.99
+      ],
+      "annualMm": 601.13,
+      "monsoonMm": 350.78
+    }
+  }
+}

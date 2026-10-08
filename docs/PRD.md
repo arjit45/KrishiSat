@@ -4,7 +4,7 @@
 **Version:** 1.3
 **Status:** ACTIVE — Source of Truth
 **Owner:** Product
-**Applies to:** KrishiSat web platform (backend + frontend + WASM core)
+**Applies to:** KrishiSat web platform (backend + frontend + JS core)
 **Last updated:** October 2026
 
 > **Governance rule.** This document is the single source of truth for the product. If a
@@ -27,6 +27,7 @@
 | 1.1 | Oct 2026 | Review + audit fixes. Adds the §12.7 severity classification, splits `SourceQuality` from `AggregateQuality` (§11.8), publishes both month baselines so the trailing window is independently checkable (§11.2), anchors ledger timestamps, corrects the §18.2 example, discloses the hindcast's data source, specifies the NASA POWER daily endpoint, defines "real" duration, switches the canonical encoding to scaled integers computed inside the core (§10.2 F10, §14.2), standardises core-artifact delivery with a checksum (§15.8), removes cold start via a committed baseline snapshot (§12.4), specifies the member seed (§11.7), and adds F14 Scenario/Replay Mode. Soil moisture is dual-sourced (ERA5-Land reanalysis + forecast model) with both labelled. |
 | 1.2 | Oct 2026 | Deployment stack locked: Vercel (single project, serverless) + Supabase. Adds F15 — an append-only, hash-keyed recommendation log (the only persisted dataset), a repository data-access seam (§14.5) ready for future multi-user work, a read-only recommendations endpoint (§18.9), and database/secret/privacy rules (§15.7, §15.10). Replaces in-process cache warming and on-demand hindcast with a scheduled cron job and a build-time committed snapshot — both forced by serverless constraints (§12.4, §21.2). |
 | 1.3 | Oct 2026 | **All eleven questions carried in v1.2 are resolved** (§29.4). Facts were verified against primary vendor documentation rather than decided: the NASA POWER daily endpoint, date format, time standard and explicit climatology period (§13.2); Open-Meteo's CC BY 4.0 attribution form and non-commercial free tier (§13.1); the OpenStreetMap ODbL attribution requirement and tile policy (§13.4); the Forecast-API soil-moisture attribution (§10.1 F1, §28); and Supabase's deny-all-with-no-policies rule (§15.7). Decisions recorded: recomputable receipt hash retained and HMAC rejected as a replacement (§15.8); Vitest rejected in favour of `node:test` (§22); two scenarios per district published from a committed catalogue (§10.2 F14); daily cron and 180-day retention with their arithmetic (§21.2, §23.1); Supabase Mumbai, REST Data API access and no pooler (§14.5, §21.2); zero-policy RLS with a review gate (§15.7); and trigger-frequency bands locked as first-hindcast frequency ±15 pp (§22.1, §24). Field capacity and wilting point re-tagged `[SOURCED]` as texture-class typicals (§12.2). |
+| 1.4 | Oct 2026 | **The computation core moves from C/WebAssembly to a deterministic integer-only JavaScript ES module** (§14.2, §29.4): the server and the browser are both JavaScript, so one committed `backend/core/ks_core.mjs` preserves every property the binary offered — a single shared implementation, independent browser verification, a load-time checksum — with no compiler and no build step. The core route becomes `GET /ks_core.mjs` with `Content-Type: text/javascript` (§20.1, §21.2); the checksum now covers the committed source file itself (§15.8); and the §14.4 boundary rule inverts — the module **is** the core, and no second implementation may exist anywhere (§14.4, §22.1). **The logic is unchanged:** the same F1–F3 math, the same thresholds, the same canonical form and receipt (§10.2 F10). |
 
 ### 1.2 Status legend
 
@@ -190,7 +191,7 @@ districts at once → clicks the highest-risk district → proceeds as J1.
 historical hindcast → notes trigger frequency and current season rating.
 
 **J4 — Independent verification.** A skeptical reviewer takes a payout's trigger receipt →
-opens the verification view → the browser re-runs the identical WASM core on the published
+opens the verification view → the browser re-runs the identical core module on the published
 canonical inputs → the recomputed receipt matches the original.
 
 **J5 — Cooperative payout roll-up.** A cooperative officer enters hectares per member (no
@@ -273,14 +274,14 @@ District parameters (registry) are defined in §11.1.
 ```
 ┌──────────────────────────────── Browser (React + Vite + Tailwind) ─────────────┐
 │  Dashboard UI · District grid · Map · CWSI chart · Audit trail · Ledger       │
-│  Verification view ── loads the SAME ks_core.wasm for independent recompute   │
+│  Verification view ── loads the SAME ks_core.mjs for independent recompute    │
 └───────────────▲───────────────────────────────────────────────▲───────────────┘
-                │ JSON over HTTPS                                │ .wasm
+                │ JSON over HTTPS                                │ module
                 │                                                │
 ┌───────────────┴───────────────── Express API (Node) ──────────┴───────────────┐
 │  Routes · validation · rate limiting · CORS · security headers                 │
 │  Committed baseline + hindcast files   Cron → log append → Supabase (F15)     │
-│  Loads ks_core.wasm  ←  the single computation core, shared with the browser   │
+│  Loads ks_core.mjs   ←  the single computation core, shared with the browser   │
 └───────────────▲───────────────────────────────────────────────▲───────────────┘
                 │                                               │
      ┌──────────┴───────────┐                        ┌──────────┴───────────┐
@@ -304,10 +305,11 @@ committed file (§12.4).
 
 ### 9.2 Single computation core (server + browser)
 
-All index math lives in one C module, `ks_core.wasm` (§14). The server and the browser load
-the identical artifact. This is what makes independent verification possible (§10.2, F10)
-and prevents server/browser divergence. **No payout math may be reimplemented in
-JavaScript or in React** — the frontend renders values, it never derives them.
+All index math lives in one deterministic ES module, `backend/core/ks_core.mjs` (§14). The
+server and the browser import the identical file. This is what makes independent verification
+possible (§10.2, F10) and prevents server/browser divergence. **No payout math may exist
+outside the core module, and none may be reimplemented in React** — the frontend renders
+values, it never derives them.
 
 ### 9.3 Live request lifecycle
 
@@ -325,13 +327,13 @@ Browser: GET /api/weather/:district?season=kharif|rabi
   │         duration; last 2–5 days may be missing → splice or truncate and flag     §12.3
   │     Each source independently timed out and validated for null/gap content.        §12.5
   ├─ 5. Normalize into the canonical engine input (§11, §11.7).
-  ├─ 6. WASM core, in order:
+  ├─ 6. Core module, in order:
   │       phenology → deficit (trailing-30d) → soil-moisture deficit → CWSI → duration → tier
   ├─ 7. Compute trigger receipt (canonical hash) over the canonical input.             §10.2 F10
   ├─ 8. Assemble response JSON with per-source SourceQuality (LIVE | FALLBACK) and an   §18
   │     aggregate AggregateQuality (LIVE | PARTIAL | OFFLINE).                        §11.8
   └─ 9. Browser renders grid, chart, audit trail, ledger, summary.
-        Verification view MAY re-run ks_core.wasm on the same canonical input.
+        Verification view MAY re-run ks_core.mjs on the same canonical input.
 ```
 
 The read path is **side-effect free**: `GET /api/weather` never writes. Recording a
@@ -344,17 +346,17 @@ on WSI, duration, and crop stage.
 ### 9.4 Other flows
 
 - **Payout simulation.** Slider change → `POST /api/calculate-payout` with the canonical
-  inputs → the same WASM tier function → response. The client never computes tiers (§9.2).
+  inputs → the same core tier function → response. The client never computes tiers (§9.2).
 - **Ledger.** Derived from the current computed triggers per district, joined with the
   cooperative member roll-up (§10.2, F7/F12). Deterministic for a given day.
 - **Backtest (precomputed at build).** Per district: fetch the NASA POWER daily series, iterate
-  season-year windows, run the WASM core per window, aggregate frequency / tiers / cumulative
+  season-year windows, run the core module per window, aggregate frequency / tiers / cumulative
   payout — then **commit the result** as `backend/config/hindcast.json` (§12.4). The endpoint only
   reads it; computing this per request would exceed a serverless execution limit (§21.2).
 - **Recommendation log (F15).** A scheduled cron job computes the current recommendation for each
   district and **appends** it to Supabase, idempotent on the canonical input hash. There is no
   update and no delete path, and the read path never writes (§9.3).
-- **Verification.** Receipt → canonical input shown → browser loads `ks_core.wasm` →
+- **Verification.** Receipt → canonical input shown → browser imports `backend/core/ks_core.mjs` →
   recomputes the hash → matches or flags a mismatch (§10.2, F10).
 - **Degradation.** Any external failure → documented fallback value + `FALLBACK` marker on
   that source only → UI badge (§18.3). Partial failures degrade partially, never globally.
@@ -619,25 +621,25 @@ verifiable.
    No floating-point value ever enters the hash path.
 3. Serialize as UTF-8 JSON with keys sorted lexicographically and no insignificant whitespace
    (numbers are emitted as JSON integers).
-4. Hash with the integer-only SHA-256 implemented in the C core → lowercase hex digest.
+4. Hash with the integer-only SHA-256 implemented in the core module → lowercase hex digest.
 
 Because step 2 leaves no floating point and step 4 has no platform-variant arithmetic, the
 digest cannot diverge between the server and the browser. Decimal-format ambiguity — trailing
 zeros, negative zero, exponential notation, integer-versus-decimal — is removed by
 construction rather than by convention.
 
-**One implementation, not two.** `ks_receipt` in `ks_core.wasm` performs step 3 *and* step 4,
-so the canonical string is produced by a single shared implementation (§14.2). If
-canonicalisation existed separately in JavaScript and in C, the two could drift and produce a
-false MISMATCH or, worse, a false MATCH.
+**One implementation, not two.** `ksReceipt` in `backend/core/ks_core.mjs` performs step 3
+*and* step 4, so the canonical string is produced by a single shared implementation (§14.2).
+If canonicalisation existed separately in the server and in the browser — or in the core and
+in any "helper" — the two could drift and produce a false MISMATCH or, worse, a false MATCH.
 
 The response includes `receiptId` (the digest), `canonicalEncoding` (`scaled-int-v1`) and
 `canonicalInput` so anyone can recompute.
 
-**Verification view.** The browser loads `ks_core.wasm`, recomputes the digest from the
-published canonical input, and reports MATCH or MISMATCH. It MUST first assert that the WASM
-it loaded matches the `coreChecksum` published by the API (§15.8) — an unasserted match
-against a different build would be a false guarantee.
+**Verification view.** The browser imports `backend/core/ks_core.mjs`, recomputes the digest
+from the published canonical input, and reports MATCH or MISMATCH. It MUST first assert that
+the module it imported hashes to the `coreChecksum` published by the API (§15.8) — an
+unasserted match against different code would be a false guarantee.
 
 **Authenticity trade-off (documented, and decided).** A recomputable hash proves *integrity
 and reproducibility*, not *origin* — anyone can compute a valid hash. **That is accepted
@@ -654,7 +656,7 @@ required, a signature is added as an **additional** field beside the hash — ne
 
 **SHOULD.** Replay the engine over 10–20 years of NASA POWER daily data per district.
 
-- For each district and each season-year, run the same WASM core over that window's
+- For each district and each season-year, run the same core module over that window's
   daily data and record the resulting tier and payout.
 - Output: trigger frequency, tier distribution, cumulative payout by year, and worst/best
   seasons.
@@ -1141,8 +1143,11 @@ Only when NASA POWER is unavailable. These are approximate IMD-published long-te
 | Anantapur | ~554 mm | ~568 mm |
 
 Monthly distribution is derived proportionally from the annual/monsoon totals using a fixed
-per-region monthly shape. The exact shape table is a `[WORKING]` calibration item and MUST
-be recorded here before implementation locks it.
+per-region monthly shape. The shape implemented in v1.4, and recorded here as required: the
+**monsoon share** `m = monsoon ÷ annual` is split equally across Jun–Sep, and the remaining
+`1 − m` is split equally across the other eight months (Jalna: Jun–Sep each ≈ 173.8 mm,
+Oct–May each ≈ 10.9 mm). The shape is a calibration placeholder `[WORKING]` and is superseded
+entirely by the committed `climate-baseline.json` whenever that file exists (§12.4).
 
 **One unified fallback strategy.** There is exactly one fallback path (this section). The
 distinct "fall back to historical weekly averages" idea from earlier drafts is removed.
@@ -1285,7 +1290,7 @@ OpenStreetMap via Leaflet (settled, v1.3 — see §12.6).
 
 ---
 
-## 14. Technology Stack & the C/WASM Core
+## 14. Technology Stack & the Deterministic JS Core
 
 ### 14.1 Stack
 
@@ -1298,63 +1303,56 @@ OpenStreetMap via Leaflet (settled, v1.3 — see §12.6).
 | Persistence | Supabase Postgres — **one** append-only table, the recommendation log (§11.9, F15) |
 | Frontend | React 19, Vite, Tailwind CSS, Chart.js + react-chartjs-2, lucide-react |
 | Map | Leaflet + react-leaflet (existing) |
-| Core | C → WebAssembly (§14.2) |
-| Client WASM | The same `ks_core.wasm` loaded by the browser for verification |
+| Core | Deterministic integer-only ES module, `backend/core/ks_core.mjs` (§14.2) |
+| Client core | The same `ks_core.mjs` imported by the browser for verification |
 
 No dependency may be added without recording it here. Specifically: **`@turf/turf` MUST NOT
 be added** (§10.1 F8).
 
 ### 14.2 The core module
 
-**Language & build.**
+**Language & delivery.**
 
-- Pure C, freestanding, built with
-  `clang --target=wasm32 -nostdlib -O3 -Wl,--no-entry -Wl,--export-all -o ks_core.wasm ks_core.c`.
-- No libc, no `malloc` requirement beyond a fixed static scratch buffer.
-- The compiled `ks_core.wasm` is **committed** to the repo (runtime needs no compiler).
-- A `scripts/build-core.sh` documents the exact build command.
+- One deterministic, integer-only **ES module**, `backend/core/ks_core.mjs`, written in plain
+  JavaScript and **committed** to the repo. There is no build step, no compiler and no
+  artifact: the shipped source is the artifact (v1.4; the C/WebAssembly variant was retired —
+  §29.4).
+- Zero imports: no `node:crypto`, no `Date`, no `Math.random`, no fetch, no I/O of any kind.
+  The threshold constants are `Object.freeze`d. A test-only internals export (`_internals`)
+  exists for §22.1 and for nothing else.
+- The server loads it with a dynamic `import()`; the browser imports the **same file** served
+  from `GET /ks_core.mjs` (§20.1). No copy is ever bundled into the frontend.
 
-**Exports (pointer ABI over shared linear memory; no JSON parsing in JS):**
+**Exports (plain functions over JS values; no memory marshalling):**
 
-```c
-// Linear memory is exported. Initial 2 pages (128 KiB); maximum 16 pages (1 MiB).
-uint32_t ks_version(void);
-uint32_t ks_scratch_ptr(void);      // base offset of the static scratch buffer
-uint32_t ks_scratch_len(void);      // authoritative buffer size
-
-// Single computation entry point: reads a fixed-layout input struct at inPtr, writes a
-// fixed-layout output struct, and returns the output offset (or 0 on error).
-uint32_t ks_compute(uint32_t inPtr, uint32_t inLen);
-
-// Canonicalise AND hash, both inside the core, so server and browser share one
-// implementation. Writes the canonical byte string at outStrPtr and the 32-byte digest
-// at outHashPtr. Returns the canonical length, or 0 on error.
-uint32_t ks_receipt(uint32_t inPtr, uint32_t inLen, uint32_t outStrPtr, uint32_t outHashPtr);
-
-uint32_t ks_stage_multiplier(uint32_t month, uint32_t season);   // 1=Kharif, 2=Rabi
-uint32_t ks_payout_tier(uint32_t wsiMilliPct, int32_t durationWeeks,
-                        uint32_t durationIsEstimated, uint32_t isSowingStage);
+```js
+export const KS_VERSION;                 // logic version, unchanged by the v1.4 host switch (§18.8)
+export function ksStageMultiplier(month, season);              // 1=Kharif, 2=Rabi
+export function ksPayoutTier(wsiMilliPct, durationWeeks,
+                             durationIsEstimated, isSowingStage);
+export function ksCompute(input);        // EngineInput (§11.2) → core engine fields (§11.3)
+export function ksReceipt(engineInput);  // → { digest, canonicalString } — canonicalises AND hashes
 ```
 
-**Memory contract.** The module is freestanding and never calls `malloc`; callers write
-structured input into the exported scratch buffer and pass offsets. `ks_scratch_len()` is
-authoritative — a caller MUST reject an input that does not fit rather than overrun it.
-Because `WebAssembly.Memory.buffer` **detaches when memory grows**, the JS wrapper MUST
-re-create its `Uint8Array` / `DataView` views after any call that can grow memory, and MUST
-re-read `ks_scratch_ptr()` if the buffer relocates. Calls are single-threaded; the scratch
-buffer is not re-entrant.
+**Module boundary.** The module is pure: identical arguments always produce identical
+results, and results depend on nothing but the arguments. Time, randomness and data access
+are injected by the caller as parameters (§14.3). There is no loader file: a dynamic
+`import()` on the server and a static import in the browser both load the same committed
+bytes.
 
-**Canonicalisation lives in the core.** The JS layer marshals numbers into the binary input
-struct and calls `ks_receipt`, which produces both the canonical bytes and the digest. There
-is exactly one implementation of the canonical form and of the hash, shared by the server and
-the browser, so they cannot disagree (§10.2 F10). All thresholds and constants live in C or in
-one shared constants header, never duplicated in JavaScript.
+**Canonicalisation lives in the core.** `ksReceipt` produces both the canonical string and
+the digest. There is exactly one implementation of the canonical form and of the hash, shared
+by the server and the browser, so they cannot disagree (§10.2 F10). All thresholds and
+constants live in this one module, never duplicated elsewhere — not in the engines, not in
+React, not in the tests.
 
 ### 14.3 Determinism rules for the core
 
-1. **No transcendentals.** `sin`, `cos`, `exp`, `log`, `pow` MUST NOT be used — libm
-   implementations differ across platforms and would break bit-identical receipts. `sqrt`
-   is permitted (a native WASM instruction).
+1. **No platform-variant arithmetic in the hash path.** The canonicalisation and hash use only
+   32-bit integer operations (`Math.imul`, `>>>`, `|0`, `^`, `&`), whose results the ECMAScript
+   specification defines identically on every platform. Transcendentals (`sin`, `cos`, `exp`,
+   `log`, `pow`) and any value whose bit pattern is implementation-defined MUST NOT enter the
+   canonicalisation or hash path.
 2. **Scaled-integer canonical form.** At the canonicalisation boundary every numeric is
    converted to an integer in fixed units (percentages → milli-percent, mm → thousandths, soil
    moisture → millionths) before hashing, so no floating-point formatting exists in the hash
@@ -1362,14 +1360,21 @@ one shared constants header, never duplicated in JavaScript.
    therefore cannot arise.
 3. **No clock, randomness, or I/O** inside the core. Time and randomness (if any) are
    injected by the caller as parameters.
-4. **Integer hash.** `ks_receipt_hash` is an integer-only SHA-256, so it is identical on
+4. **Integer hash.** The SHA-256 inside `ksReceipt` is integer-only, so it is identical on
    every platform.
 
 ### 14.4 Frontend responsibility boundary
 
-The frontend **renders** values and MAY call the WASM core **only** to independently
+The frontend **renders** values and MAY import the core module **only** to independently
 recompute a receipt for verification (F10). It MUST NOT compute indices or tiers for
 display; those always come from the API response.
+
+**The module is the core — there is no mirror.** The committed `ks_core.mjs` is the single
+implementation of the index math. (The pre-v1.4 rule "no JavaScript mirror of the C core"
+guarded a binary against a JS copy; with the core itself in JavaScript the rule inverts: no
+second implementation may exist in any language, least of all in React.) Tests import the
+shipped module (§22.1), never a reimplementation, so the tests exercise exactly the code
+that ships.
 
 ---
 
@@ -1421,7 +1426,7 @@ Requests from unlisted origins are rejected.
 ### 15.4 Transport & headers
 
 - Production is served over HTTPS (behind a reverse proxy). HSTS enabled.
-- Security headers: `Content-Security-Policy` (must permit the WASM module and the map tile
+- Security headers: `Content-Security-Policy` (must permit the core module and the map tile
   origin), `X-Content-Type-Options: nosniff`, `Referrer-Policy`, `X-Frame-Options:
   DENY`/`frame-ancestors 'none'`, and `Permissions-Policy` where useful.
 
@@ -1465,11 +1470,12 @@ Requests from unlisted origins are rejected.
 
 ### 15.8 Artifact & receipt integrity
 
-- `ks_core.wasm` is checksummed at load; a mismatch between build-time and load-time hashes
-  is a hard failure.
+- `backend/core/ks_core.mjs` is checksummed at load: the server hashes the committed source
+  file once, serves those same bytes, and a mismatch between the published `coreChecksum` and
+  the bytes actually served is a hard failure.
 - The API publishes `coreChecksum` in `/api/health` (§18.8). The verification view MUST assert
-  that the WASM it loaded hashes to that checksum before it may report MATCH — an unasserted
-  match against a different build would be a false guarantee.
+  that the module it imported hashes (WebCrypto `digest`) to that checksum before it may
+  report MATCH — an unasserted match against different code would be a false guarantee.
 - The core artifact is served from a **single** location (the backend, §21.2) and is never
   duplicated into the frontend bundle, so two copies cannot drift.
 - Receipt hashing is deterministic and integer-only (§14.3). **Origin authentication is
@@ -1526,7 +1532,7 @@ Requests from unlisted origins are rejected.
 | `POST /api/calculate-payout` | p95 ≤ 150 ms |
 | Backtest summary (cached) | p95 ≤ 500 ms |
 | Dashboard first contentful paint | ≤ 2.5 s on a mid-tier mobile connection |
-| WASM core load | ≤ 100 ms |
+| Core module load | ≤ 100 ms |
 
 ### 16.2 Availability & degradation
 
@@ -1700,7 +1706,7 @@ amounts and tiers match the computed triggers.
 
 Request: `{ "receiptId": "…", "canonicalInput": "…" }`
 Response: `{ "match": true | false, "recomputedReceiptId": "…" }`
-(The browser MAY instead recompute locally with WASM; this endpoint supports server-side
+(The browser MAY instead recompute locally with the core module; this endpoint supports server-side
 verification.)
 
 ### 18.6 `GET /api/backtest/:district?years=20`
@@ -1851,11 +1857,14 @@ real archive data, not current conditions; the receipt carries the scenario id (
 ```
 backend/
 ├── server.js                 # Express app, routes, wiring
+├── scripts/
+│   └── fetch-baseline.js  # build-time NASA POWER climatology refresh (§12.4); never on a request path
+├── test/
+│   ├── core.test.mjs      # §22.1 layers 1–5 against the committed core
+│   ├── engine.test.mjs    # §22.1 layers 1 & 7 — duration, quality ladder, mocked externals
+│   └── api.test.mjs       # §22.1 layer 6 — endpoint contracts
 ├── core/
-│   ├── ks_core.wasm         # committed build artifact (§14.2)
-│   ├── ks_core.c            # C source
-│   ├── constants.h          # thresholds/constants shared by the core
-│   └── core.js              # WASM loader + typed wrapper (no math)
+│   └── ks_core.mjs          # the single deterministic core (§14.2) — committed source, no build step
 ├── config/
 │   ├── districts.js                 # district registry (§11.1) — the ONLY registry
 │   ├── members.js                   # deterministic seeded member roster (§11.7, F12)
@@ -1864,7 +1873,7 @@ backend/
 │   └── scenarios.json               # the F14 replay catalogue (data, not code)
 ├── engines/
 │   ├── deficitEngine.js     # orchestrates core calls; assembles EngineOutput
-│   ├── phenology.js         # thin wrapper over ks_stage_multiplier
+│   ├── phenology.js         # §12.2 stage table → getCropStage (pure; wraps the core)
 │   └── climateCache.js      # reads the committed snapshot; instance cache is best-effort (§12.4)
 ├── services/
 │   ├── openMeteo.js
@@ -1884,7 +1893,7 @@ backend/
 The deployed project also carries, at the repository root:
 
 ```
-vercel.json                 # API rewrite + SPA fallback + wasm Content-Type + cron (§21.2)
+vercel.json                 # API rewrite + SPA fallback + module Content-Type + cron (§21.2)
 package.json                # root manifest — Vercel resolves a function's dependencies here
 api/
 └── index.js                # exports the Express handler; MUST NOT call app.listen() (§21.2)
@@ -1903,8 +1912,8 @@ recorded rather than hidden so the duplication is not mistaken for drift later.
 **Path resolution.** The earlier `engines/districts.js` vs `config/districts.js` conflict is
 resolved: the registry lives at `backend/config/districts.js`. There is exactly one registry.
 
-**Core artifact route.** `server.js` serves `GET /ks_core.wasm` from `backend/core/` with
-`Content-Type: application/wasm`, and the frontend fetches it from `VITE_API_URL`. This single
+**Core module route.** `server.js` serves `GET /ks_core.mjs` from `backend/core/` with
+`Content-Type: text/javascript`, and the browser imports it from its own origin. This single
 served location is what the checksum in `/api/health` attests to (§15.8). There is no second
 copy under `frontend/`.
 
@@ -1933,7 +1942,7 @@ frontend/src/
 │   ├── RecommendationLog.jsx # F15 — read-only history from §18.9
 │   └── MethodologyNotes.jsx  # §28 disclosures
 ├── lib/
-│   ├── coreClient.js         # loads ks_core.wasm for verification only
+│   ├── coreClient.js         # imports /ks_core.mjs for verification only
 │   ├── formatters.js         # fmtINR, fmtPct, fmtWks, safeNum (presentational only)
 │   └── api.js                # fetch wrappers against VITE_API_URL
 └── constants/
@@ -1966,20 +1975,21 @@ service-role key to every visitor.
 
 ### 21.2 Running
 
-- **Local, both halves:** `npm install && npm start` in `backend/` (serves the committed
-  `.wasm`; no compiler needed) and `npm install && npm run dev` in `frontend/`.
-- The C core is rebuilt only by maintainers via `scripts/build-core.sh`; the build records the
-  artifact's SHA-256 into a committed checksum consumed by `/api/health` (§15.8).
-- `GET /ks_core.wasm` is served by the API so the browser loads the **same** artifact the
+- **Local, both halves:** `npm install && npm start` in `backend/` (serves the committed core
+  module; there is nothing to compile) and `npm install && npm run dev` in `frontend/`.
+- The core is committed JavaScript: there is nothing to rebuild. Changing a threshold is a
+  code change reviewed against this PRD, and `coreChecksum` is the SHA-256 of the committed
+  file itself, consumed by `/api/health` (§15.8).
+- `GET /ks_core.mjs` is served by the API so the browser imports the **same** module the
   server computes with. The frontend never bundles its own copy.
 
 **Production — one Vercel project, one origin.** The frontend and the API deploy as a **single
-Vercel project**, so the browser calls `/api/...` and `/ks_core.wasm` on its own origin (no CORS
+Vercel project**, so the browser calls `/api/...` and `/ks_core.mjs` on its own origin (no CORS
 in production, §15.3).
 
 - `vercel.json` declares (a) the API rewrite to the serverless entrypoint, (b) the SPA fallback
-  rewrite to `index.html`, and (c) a `Content-Type: application/wasm` header for
-  `/ks_core.wasm` — without (c) the browser refuses to instantiate the module, and the whole
+  rewrite to `index.html`, and (c) a `Content-Type: text/javascript` header for
+  `/ks_core.mjs` — without (c) the browser refuses to execute the module, and the whole
   verification feature (F10) silently dies.
 - The Express app is **exported as a handler** (`module.exports = app`); it MUST NOT call
   `app.listen()` in the deployed runtime, because the platform owns the listener.
@@ -2020,24 +2030,24 @@ the core, how to run tests, and the known limitations.
 
 Testing is **Phase A**, not post-hoc — the product's credibility rests on the math. Framework:
 Node's built-in `node:test` (no new runtime dependency). **Vitest and Testing Library are decided
-against (v1.3):** the engine tests must run against the compiled `ks_core.wasm` in Node (§22.1),
-which `node:test` does directly, and the frontend is presentational by §14.4 — a browser-oriented
+against (v1.3):** the engine tests must run against the committed `ks_core.mjs` imported in
+Node (§22.1), which `node:test` does directly, and the frontend is presentational by §14.4 — a browser-oriented
 runner would exist to test formatters. Adopting one later would mean the frontend had acquired
 real logic, which is itself a PRD change (§14.4, §29.4).
 
 ### 22.1 Layers
 
-1. **Engine unit / characterization tests** — run against the **compiled `ks_core.wasm` loaded
-   in Node**, never against a JS reimplementation (a JS mirror is forbidden by §14.4 and would
-   test code that is not shipped). Coverage: stage multipliers for all 12 months × both seasons
-   (including off-season), shortfall, soil deficit, CWSI (including saturation and drought
-   extremes), duration counting and reset, and tier boundaries.
+1. **Engine unit / characterization tests** — run against the **committed `ks_core.mjs`
+   imported in Node** — the shipped implementation itself; §14.4 forbids any second one, so
+   there is no reimplementation to test against. Coverage: stage multipliers for all 12 months
+   × both seasons (including off-season), shortfall, soil deficit, CWSI (including saturation
+   and drought extremes), duration counting and reset, and tier boundaries.
 2. **Determinism tests** — identical input yields identical output **and** identical receipt
-   hash, across repeated runs and across a fresh WASM instance.
-3. **Canonicalisation cross-implementation test** — the canonical byte string for a given input
-   is identical when produced on the server and in a browser-like environment, and hashes to
-   the same digest. This is the regression test for the float-formatting class of bug
-   (§10.2 F10).
+   hash, across repeated runs and across a freshly imported module instance.
+3. **Canonicalisation cross-environment test** — the canonical byte string for a given input
+   is identical when produced on the server (dynamic `import()`) and in a browser-like
+   environment (static import of the same file), and hashes to the same digest. This is the
+   regression test for the float-formatting class of bug (§10.2 F10).
 4. **Severity / tier coherence test** — for **every** input in both estimated and
    real-duration modes, `severityLevel` equals the §12.7 mirror of `payoutTier` (they never
    disagree); the four numeric WSI bands partition 0–100 with no gap or overlap; all five
@@ -2129,10 +2139,10 @@ Duration OR-clauses are disabled whenever duration is estimated (§12.3).
 | Archive lag (ERA5-Land 5-day delay — the **normal** case, not an edge case) | CWSI / duration gaps | Take the trailing precipitation window from the Forecast API `past_days=30`; splice or truncate the soil leg and mark duration estimated (§12.3, §13.1) |
 | Unvalidated crop-stage multipliers and fallback monthly shape | Misleading precision | `[WORKING]` tags + hindcast calibration (§12.2, §12.5); field capacity and wilting point are `[SOURCED]` as texture-class typicals, not district measurements |
 | Hindcast mistaken for claim validation | Overclaiming | Explicit labeling (§10.2 F11) |
-| WASM build reproducibility | Receipt mismatch | Checksum artifact; documented build |
+| Core artifact integrity | Receipt mismatch | Committed module; `coreChecksum` asserted at load (§15.8) |
 | Platform float variance | Non-determinism | No transcendentals; scaled-integer canonical form (§14.3) |
 | Regulatory misinterpretation | Compliance risk | Clear "decision-support, not insurer" disclaimers |
-| Duplicate WASM copies drifting | A false "verified" receipt | Serve one artifact from the backend; publish and assert `coreChecksum` (§15.8) |
+| Duplicate core copies drifting | A false "verified" receipt | Serve one module from the backend; publish and assert `coreChecksum` (§15.8) |
 | Scenario output mistaken for live | Misleading payout figure | Scenario id inside the canonical input; distinct banner; receipts cannot collide (§10.2 F14) |
 | Supabase unreachable | The log cannot be written | Reads never need it (§16.2); the cron retries; health reports it; the dashboard is unaffected |
 | Log stops appending | The "and when" claim becomes silently false | Last-append timestamp in `/api/health`; alert on staleness (§17) |
@@ -2284,7 +2294,7 @@ recorded decision. The original wording is retained at the end of this section f
 | # | Question | Resolution | Where |
 | :--- | :--- | :--- | :--- |
 | 1 | Receipt authenticity: recomputable hash vs HMAC | **Recomputable hash ships; HMAC rejected as a replacement.** A verifier cannot check an HMAC without the signing key, which would destroy F10's promise that any user can reproduce a payout in their own browser. If provenance is ever needed it is added as an *additional* field beside the hash, never in place of it. | §10.2 F10, §15.8 |
-| 2 | Add Vitest + Testing Library? | **No.** `node:test` is retained. Engine tests must run against the compiled WASM in Node, which `node:test` does directly; the frontend is presentational (§14.4), so a browser runner would test formatters and add a toolchain (§15.11). | §22, §22.1 |
+| 2 | Add Vitest + Testing Library? | **No.** `node:test` is retained. Engine tests must run against the core module in Node (v1.4: the committed `ks_core.mjs`), which `node:test` does directly; the frontend is presentational (§14.4), so a browser runner would test formatters and add a toolchain (§15.11). | §22, §22.1 |
 | 3 | NASA POWER climatology period + daily endpoint | **Both settled by verification.** Daily: `/api/temporal/daily/point`, dates `YYYYMMDD`, **defaults to Local Solar Time** so `time-standard=UTC` must be passed, data from 1981-01-01. The period is never assumed: every request passes an explicit `start`/`end` and the UI shows that stored string. | §13.2, §12.6 |
 | 4 | Open-Meteo / OSM licence and attribution wording | **Settled by verification.** Open-Meteo: CC BY 4.0 with the vendor's own form `Weather data by Open-Meteo.com` linked and placed *next to* the data; the free tier is non-commercial. OSM: credit "OpenStreetMap", make the ODbL clear, `© OpenStreetMap contributors` accepted, in a corner of the map; the standard tile server is not a production tile source. | §13.1, §13.4 |
 | 5 | The `[WORKING]` calibration values | **Partly settled.** Field capacity and wilting point are **re-tagged `[SOURCED]`** as texture-class typicals — all four sit inside published ranges for their class — and registered. The crop-stage multipliers and the fallback monthly shape stay `[WORKING]`: no citation supports them, so the hindcast still gates them. | §12.2, §12.5, §12.6 |
@@ -2295,6 +2305,7 @@ recorded decision. The original wording is retained at the end of this section f
 | 9 | Supabase region + serverless connection strategy | **Settled.** Access is via the **REST Data API** through `@supabase/supabase-js` — HTTPS only, holding no Postgres connection — so there is no pool to exhaust and **no pooler is configured**; a wire-protocol client is already foreclosed by §14.5. Project in **Mumbai (`ap-south-1`)**, function co-located. | §14.5, §21.2 |
 | 10 | Cron cadence + retention window | **Settled.** **Once daily** — the floor the design assumes — and **180 days**. Sources update daily and the logged record is a season-day, so a finer cadence adds rows without information; the append is idempotent, so more frequent is harmless. ≈1,460 rows/year, ≈720 live at any time (180 days × 4 districts). | §21.2, §23.1 |
 | 11 | RLS posture in the migration | **Settled.** RLS enabled with **zero policies** (Supabase documents this as denying every request), plus `REVOKE` from `anon`/`authenticated` and a grant only to `service_role`. The migration is the only place a policy may live, and adding one requires a version bump. | §15.7 |
+| 12 | C/WebAssembly core or plain JavaScript? (v1.4) | **Decided (v1.4): plain JavaScript.** The core is a deterministic integer-only ES module, `backend/core/ks_core.mjs`, committed to the repo. The server and the browser are both JavaScript, so one module preserves every property the binary offered — a single shared implementation, independent browser verification, a load-time checksum — with no compiler and no build step. A C/WebAssembly artifact remains an option if an external auditor ever requires a language-agnostic binary; the logic would move over unchanged. | §14.2, §14.3, §14.4, §22.1 |
 
 **Deliberately left open — these need measurement, not a decision.** Two things cannot be closed
 by judgement, and closing them by assertion would be exactly the unearned certainty this document
@@ -2341,7 +2352,7 @@ KrishiSat implements a parametric trigger architecture. Given identical inputs �
 30-year baselines, real-time soil moisture, and crop-stage multipliers — the Weighted
 Shortfall Index produces an identical payout recommendation every time. There is no
 adjuster, no field visit, and no human variable. Each payout carries a trigger receipt, and
-the computation core is a single WebAssembly module that any user can re-run in their own
+the computation core is a single deterministic module that any user can run in their own
 browser to reproduce the result exactly. That is the literal, testable form of
 "deterministic, auditable settlement."
 
@@ -2361,4 +2372,4 @@ audit trail and a screenshot.
 
 ---
 
-*End of document — KrishiSat PRD v1.3*
+*End of document — KrishiSat PRD v1.4*
