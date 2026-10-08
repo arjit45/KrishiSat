@@ -34,6 +34,7 @@ const recommendations = require('./repositories/recommendations');
 const { DISTRICTS, DISTRICT_IDS, getDistrict } = require('./config/districts');
 const climateCache = require('./engines/climateCache');
 const { computeDistrictWeather } = require('./engines/deficitEngine');
+const recommendationLog = require('./services/recommendationLog');
 const { loadCore, CORE_SPECIFIER } = require('./engines/phenology');
 const { securityHeaders, corsAllowlist } = require('./middleware/security');
 const { rateLimit } = require('./middleware/rateLimit');
@@ -411,24 +412,29 @@ app.post('/api/verify-receipt', (req, res) => res.status(501).json({
   detail: 'Server-side receipt verification is specified by PRD §18.5 but not implemented. Recompute the receipt in the browser instead: assert that the imported module hashes to coreChecksum (/api/health), then SHA-256 the published canonicalInput and compare it with receiptId.',
 }));
 
-// ── GET /api/cron/recommendations ───────────────────────────────────────────
-// The authenticated cron entrypoint declared in vercel.json (§21.2). Vercel sends
+// ── GET /api/cron/recommendations (§21.2, F15) ─────────────────────────────
+// The authenticated cron entrypoint declared in vercel.json. Vercel sends
 // `Authorization: Bearer $CRON_SECRET`; with no secret configured it refuses
 // rather than running unauthenticated (fail closed).
 //
-// The writer — backend/services/recommendationLog.js (F15, §20.1) — is not
-// implemented, so this answers 501 instead of pretending to succeed. A scheduled
-// run must not look like a working log while recording nothing.
-app.get('/api/cron/recommendations', (req, res) => {
+// The job itself lives in services/recommendationLog.js — this route is only the
+// transport. It answers non-2xx when the log could not be written, because a
+// scheduled run that silently records nothing is exactly the failure §17 warns
+// about; the run is idempotent, so a platform retry is harmless.
+app.get('/api/cron/recommendations', async (req, res) => {
   const secret = process.env.CRON_SECRET;
   if (!secret) return res.status(500).json({ error: 'CRON_SECRET is not configured' });
   if (req.get('authorization') !== `Bearer ${secret}`) {
     return res.status(401).json({ error: 'Unauthorized' });
   }
-  return res.status(501).json({
-    error: 'Not implemented',
-    detail: 'The recommendation-log writer (backend/services/recommendationLog.js) is specified by PRD F15/§20.1 but not yet implemented.',
-  });
+  try {
+    const summary = await recommendationLog.runDailyJob();
+    return res.status(summary.logWritable ? 200 : 503).json(summary);
+  } catch (err) {
+    // eslint-disable-next-line no-console
+    console.error(`[KrishiSat] cron failed: ${err.message}`);
+    return res.status(500).json({ error: 'Job failed' });
+  }
 });
 
 // ── GET /api/recommendations (§18.9) ────────────────────────────────────────

@@ -49,6 +49,10 @@ const MAX_LIMIT = 200;
 // stopped appending and the product's "and when" claim is quietly untrue (§17).
 const STALE_AFTER_MS = 36 * 60 * 60 * 1000;
 
+// §23.1 retention window: one row per district per day is ≈1,460 rows a year, so
+// 180 days bounds the live table at roughly 720 rows.
+const RETENTION_DAYS = 180;
+
 // Every query is bounded, so a slow or unreachable database can never hold a
 // request open. This is the mechanism behind "the database is never on the
 // critical read path" (§16.2) — the claim is only true if it is enforced here.
@@ -227,6 +231,39 @@ async function list({ district, from, to, limit, cursor } = {}) {
 }
 
 /**
+ * Retention (§23.1). Rows past the window are pruned by the same scheduled job
+ * that appends — the ONE sanctioned DELETE path, which is why the migration
+ * grants DELETE to service_role and withholds UPDATE.
+ *
+ * Bounded and non-throwing for the same reason the read path is: a prune that
+ * cannot run must not stop the job from appending today's recommendation.
+ *
+ * @param {{retentionDays?: number}} [options]
+ */
+async function prune({ retentionDays } = {}) {
+    const days = Number(retentionDays === undefined ? RETENTION_DAYS : retentionDays);
+    if (!Number.isFinite(days) || days <= 0) {
+        return { pruned: 0, reason: 'invalid retention window' };
+    }
+    const db = getClient();
+    if (!db) return { pruned: 0, reason: 'not-configured' };
+
+    const cutoff = new Date(Date.now() - days * 24 * 60 * 60 * 1000).toISOString();
+    try {
+        const { data, error } = await db
+            .from(TABLE)
+            .delete()
+            .lt('created_at', cutoff)
+            .select('id');
+
+        if (error) return { pruned: 0, cutoff, reason: error.message };
+        return { pruned: Array.isArray(data) ? data.length : 0, cutoff };
+    } catch (err) {
+        return { pruned: 0, cutoff, reason: err && err.message ? err.message : 'unexpected error' };
+    }
+}
+
+/**
  * Report the log's own health for `/api/health` (§17, §18.8). The caller MUST
  * treat this as advisory and must not let it fail the request.
  */
@@ -270,9 +307,10 @@ async function health() {
 module.exports = {
     append,
     list,
+    prune,
     health,
     isConfigured,
     // Exported for the mapper tests in §22.1 — the contract translation is the
     // one thing here that can be wrong without a database present.
-    _internal: { toContract, toRow, encodeCursor, decodeCursor, DEFAULT_LIMIT, MAX_LIMIT },
+    _internal: { toContract, toRow, encodeCursor, decodeCursor, DEFAULT_LIMIT, MAX_LIMIT, RETENTION_DAYS },
 };

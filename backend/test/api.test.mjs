@@ -24,6 +24,7 @@ const CORE_PATH = path.resolve(HERE, '../core/ks_core.mjs');
 
 const { ksCompute, ksReceipt } = await import('../core/ks_core.mjs');
 const engine = require('../engines/deficitEngine');
+const { DISTRICT_IDS } = require('../config/districts');
 
 // ── Stub the engine before the server captures its reference ────────────────
 const realCompute = engine.computeDistrictWeather;
@@ -368,13 +369,34 @@ describe('§18.6 GET /api/backtest/:district', () => {
 
 // ── cron §21.2 ────────────────────────────────────────────────────────────
 describe('§21.2 cron entrypoint', () => {
-  test('fails closed without the secret, rejects a wrong one, and never fakes success', async () => {
+  test('fails closed with no secret and rejects a wrong one', async () => {
     const wrong = await get('/api/cron/recommendations', { headers: { authorization: 'Bearer nope' } });
     assert.equal(wrong.status, 401);
-    const right = await get('/api/cron/recommendations', { headers: { authorization: 'Bearer test-cron-secret' } });
-    assert.equal(right.status, 501); // the writer is not implemented; 501 is the honest answer
-    const body = await right.json();
-    assert.match(body.detail, /not yet implemented/);
+
+    const saved = process.env.CRON_SECRET;
+    delete process.env.CRON_SECRET;
+    try {
+      const closed = await get('/api/cron/recommendations', { headers: { authorization: 'Bearer test-cron-secret' } });
+      assert.equal(closed.status, 500);
+      assert.match((await closed.json()).error, /CRON_SECRET/);
+    } finally {
+      process.env.CRON_SECRET = saved;
+    }
+  });
+
+  test('runs the writer and reports honestly when the log cannot be written', async () => {
+    const res = await get('/api/cron/recommendations', { headers: { authorization: 'Bearer test-cron-secret' } });
+    // No SUPABASE_URL in a test run, so the audit trail is broken. The route must
+    // say so rather than answer 200 over a log that recorded nothing (§17).
+    assert.equal(res.status, 503);
+    const body = await res.json();
+    assert.equal(body.status, 'ok');
+    assert.equal(body.counts.districts, 4);
+    assert.equal(body.logConfigured, false);
+    assert.equal(body.logWritable, false);
+    assert.equal(body.retention.days, 180);
+    assert.equal(typeof body.runAt, 'string');
+    for (const d of body.districts) assert.ok(DISTRICT_IDS.includes(d.district));
   });
 });
 
