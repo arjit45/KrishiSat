@@ -16,6 +16,10 @@ const { getDistrict } = require('../config/districts');
 
 const ISO_RE = /^\d{4}-\d{2}-\d{2}$/;
 
+/** Bounds for one member's hectare override (§18.7) and how many may be sent. */
+const MAX_OVERRIDE_HA = 100;
+const MAX_OVERRIDES = 200;
+
 /** 404 when the district is not a registry key (§15.2). */
 function requireDistrict(req, res, next) {
   const key = req.params.district;
@@ -103,11 +107,53 @@ function validatePayoutBody(body, validStageIds) {
   };
 }
 
+/**
+ * POST /api/cooperatives/:district hectare overrides (§18.7, §15.2).
+ *
+ * The server holds no member state, so overrides arrive with each request (§16.3).
+ * A key must belong to the committed roster for THIS district — otherwise a client
+ * could append phantom members and inflate a cooperative total. Values are bounded
+ * (0–100 ha) so one request cannot produce an absurd aggregate; the seed range of
+ * 0.4–6.0 ha is a property of the roster, not a limit on what an officer may enter.
+ * The response to an invalid override is generic (§15.9): the client learns which
+ * field is wrong, never how the server validates it.
+ *
+ * @param {any} body
+ * @param {Set<string>} validRefs — member references for the requested district
+ */
+function validateHectareOverrides(body, validRefs) {
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return { ok: false, error: 'Invalid body.' };
+  }
+
+  const raw = body.overrides;
+  if (raw === undefined || raw === null) return { ok: true, value: {} };
+  if (typeof raw !== 'object' || Array.isArray(raw)) {
+    return { ok: false, error: 'Invalid overrides.' };
+  }
+
+  const entries = Object.entries(raw);
+  if (entries.length > MAX_OVERRIDES) return { ok: false, error: 'Invalid overrides.' };
+
+  const value = {};
+  for (const [ref, hectares] of entries) {
+    if (!validRefs.has(ref)) return { ok: false, error: 'Unknown member reference.' };
+    if (typeof hectares !== 'number' || !Number.isFinite(hectares)
+      || hectares < 0 || hectares > MAX_OVERRIDE_HA) {
+      return { ok: false, error: 'Invalid hectares.' };
+    }
+    // 0.01 ha resolution — matches the roster's precision and keeps the sum stable.
+    value[ref] = Math.round(hectares * 100) / 100;
+  }
+  return { ok: true, value };
+}
+
 module.exports = {
   requireDistrict,
   readSeason,
   readDateRange,
   readLimit,
   validatePayoutBody,
+  validateHectareOverrides,
   ISO_RE,
 };

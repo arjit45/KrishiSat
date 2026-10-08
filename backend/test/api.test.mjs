@@ -25,6 +25,7 @@ const CORE_PATH = path.resolve(HERE, '../core/ks_core.mjs');
 const { ksCompute, ksReceipt } = await import('../core/ks_core.mjs');
 const engine = require('../engines/deficitEngine');
 const { DISTRICT_IDS } = require('../config/districts');
+const memberRoster = require('../config/members');
 
 // ── Stub the engine before the server captures its reference ────────────────
 const realCompute = engine.computeDistrictWeather;
@@ -420,12 +421,202 @@ describe('§21.2 cron entrypoint', () => {
 
 // ── §18.5 /api/verify-receipt ─────────────────────────────────────────────
 describe('§18.5 POST /api/verify-receipt', () => {
-  test('is explicitly not implemented, and says where verification does live', async () => {
-    const res = await post('/api/verify-receipt', { receiptId: 'x', canonicalInput: '{}' });
-    assert.equal(res.status, 501);
+  test('accepts a receipt the core produced (§18.5)', async () => {
+    const r = stubLive('jalna').receipt;
+    const res = await post('/api/verify-receipt', {
+      receiptId: r.receiptId,
+      canonicalInput: r.canonicalInput,
+    });
+    assert.equal(res.status, 200);
     const body = await res.json();
-    assert.equal(body.error, 'Not implemented');
-    assert.match(body.detail, /coreChecksum/);
+    assert.equal(body.match, true);
+    assert.equal(body.recomputedReceiptId, r.receiptId);
+  });
+
+  test('a forged id does not match, and the endpoint says what does (§18.5)', async () => {
+    const r = stubLive('jalna').receipt;
+    const forged = '0'.repeat(64);
+    const res = await post('/api/verify-receipt', {
+      receiptId: forged,
+      canonicalInput: r.canonicalInput,
+    });
+    // A mismatch is a result, not an error: the receipt simply is not the one this
+    // canonical string produces.
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.match, false);
+    assert.equal(body.recomputedReceiptId, r.receiptId);
+    assert.notEqual(body.recomputedReceiptId, forged);
+  });
+
+  test('malformed input is refused generically (§15.9)', async () => {
+    const cases = [
+      { receiptId: 'x', canonicalInput: '{}' },
+      { receiptId: 'a'.repeat(64) },
+      { canonicalInput: '{}' },
+      { receiptId: 'a'.repeat(64), canonicalInput: '' },
+      'not-an-object',
+    ];
+    for (const payload of cases) {
+      const res = await post('/api/verify-receipt', payload);
+      assert.equal(res.status, 400, JSON.stringify(payload));
+      const body = await res.json();
+      assert.equal(typeof body.error, 'string');
+      assert.ok(!/internal|stack|\bfile\b|server/i.test(body.error), body.error);
+    }
+  });
+});
+
+// ── §18.4 /api/ledger (F7) ─────────────────────────────────────────────────
+describe('§18.4 GET /api/ledger (F7)', () => {
+  test('is causal: only triggering districts appear, with their own tier', async () => {
+    const res = await get('/api/ledger');
+    assert.equal(res.status, 200);
+    assert.match(res.headers.get('x-ledger-label') || '', /Simulated/); // §F7, §19.2
+    const entries = await res.json();
+    assert.ok(Array.isArray(entries));
+
+    // bikaner is stubbed degraded → no trigger → no entries. Never a substitute.
+    assert.equal(entries.length, 3 * memberRoster.getMembers('jalna').length);
+    for (const e of entries) {
+      assert.ok(!/Bikaner/i.test(e.cooperative));
+      assert.ok(/Jalna|Dewas|Anantapur/.test(e.cooperative));
+    }
+
+    // Every entry's amount is hectares × that district's computed payout.
+    const stub = stubLive('jalna');
+    const payoutPerHectare = stub.engineOutput.payoutPerHectare;
+    const jalna = entries.filter((e) => /Jalna/.test(e.cooperative));
+    assert.equal(jalna.length, memberRoster.getMembers('jalna').length);
+    const first = jalna[0];
+    assert.equal(first.tier, stub.engineOutput.payoutTier);
+    assert.equal(first.amount, Math.round(memberRoster.getMembers('jalna')[0].hectares * payoutPerHectare));
+    assert.equal(first.triggerIndex, `WSI: ${stub.engineOutput.weightedShortfallIndex.toFixed(1)}%`);
+  });
+
+  test('is deterministic: a second read is byte-identical, with no wall clock (§F7)', async () => {
+    const a = await get('/api/ledger');
+    const b = await get('/api/ledger');
+    assert.equal(await a.text(), await b.text());
+  });
+
+  test('timestamps are anchored to the fixed settlement time and stay ordered (§F7)', async () => {
+    const entries = await (await get('/api/ledger')).json();
+    const stamps = entries.map((e) => e.timestamp);
+    assert.match(stamps[0], /^\d{4}-\d{2}-\d{2} 06:00 IST$/); // fixed 06:00 IST anchor
+    for (const st of stamps) assert.match(st, /^\d{4}-\d{2}-\d{2} \d{2}:\d{2} IST$/);
+    // lexicographic order matches chronological order for this format
+    const sorted = [...stamps].sort();
+    assert.deepEqual(stamps, sorted);
+    assert.equal(new Set(stamps).size, entries.length); // every entry is distinguishable
+  });
+
+  test('entries carry exactly the §11.5 fields and draw from the F12 roster', async () => {
+    const entries = await (await get('/api/ledger')).json();
+    const roster = memberRoster.getMembers('jalna');
+    const seen = new Set();
+    for (const e of entries) {
+      assert.deepEqual(Object.keys(e).sort(), [
+        'amount', 'cooperative', 'cropStage', 'hectares', 'memberRef',
+        'tier', 'timestamp', 'triggerIndex',
+      ]);
+      assert.equal(typeof e.amount, 'number');
+      assert.ok(e.amount > 0);
+      assert.ok(e.hectares >= 0.4 && e.hectares <= 6.0);
+      seen.add(e.memberRef);
+    }
+    // §F12: no selection rule of its own — the whole roster of a triggering
+    // district appears, once each.
+    const jalna = entries.filter((e) => /Jalna/.test(e.cooperative));
+    assert.deepEqual(new Set(jalna.map((e) => /\(([^)]+)\)/.exec(e.memberRef)[1])),
+      new Set(roster.map((m) => m.memberRef)));
+    assert.equal(seen.size, entries.length);
+  });
+});
+
+// ── §18.7 /api/cooperatives/:district (F12) ────────────────────────────────
+describe('§18.7 GET/POST /api/cooperatives/:district (F12)', () => {
+  test('returns the committed roster and a stateless aggregate (§18.7)', async () => {
+    const res = await get('/api/cooperatives/jalna');
+    assert.equal(res.status, 200);
+    const body = await res.json();
+
+    assert.equal(body.district.id, 'jalna');
+    assert.equal(body.members.length, 25);
+    assert.equal(body.roster.memberCount, 25);
+    assert.equal(body.roster.label, 'illustrative sample of 25 members'); // §F12 wording
+    assert.equal(body.roster.illustrative, true);
+    assert.equal(body.persistence.serverSide, false); // §16.3 — no server state
+    assert.match(body.persistence.note, /session-only/);
+
+    // Areas come from the committed file, not from anything the request sent.
+    const roster = memberRoster.getMembers('jalna');
+    for (let i = 0; i < roster.length; i++) {
+      assert.equal(body.members[i].memberRef, roster[i].memberRef);
+      assert.equal(body.members[i].hectares, roster[i].hectares);
+      assert.equal(body.members[i].overridden, false);
+    }
+
+    // memberPayout = hectares × tierPayoutPerHectare (§F12)
+    const engine = stubLive('jalna').engineOutput;
+    const coreLabels = (await import('../core/ks_core.mjs')).TIER_LABELS;
+    assert.equal(body.assessment.tierLabel, coreLabels[engine.payoutTier]);
+    const expectedSum = body.members.reduce((s, m) => s + m.memberPayout, 0);
+    assert.equal(body.aggregate.cooperativeSum, expectedSum);
+    assert.equal(body.aggregate.currency, 'INR');
+    assert.equal(body.aggregate.totalHectares,
+      Math.round(body.members.reduce((s, m) => s + m.effectiveHectares, 0) * 100) / 100);
+    assert.equal(body.members[0].memberPayout,
+      Math.round(body.members[0].effectiveHectares * engine.payoutPerHectare));
+  });
+
+  test('a hectare override changes the aggregate and nothing else (§18.7)', async () => {
+    const base = await (await get('/api/cooperatives/jalna')).json();
+    const ref = base.members[0].memberRef;
+    const engine = stubLive('jalna').engineOutput;
+
+    const res = await post('/api/cooperatives/jalna', { overrides: { [ref]: 5 } });
+    assert.equal(res.status, 200);
+    const body = await res.json();
+
+    assert.equal(body.persistence.overrideCount, 1);
+    const row = body.members.find((m) => m.memberRef === ref);
+    assert.equal(row.effectiveHectares, 5);
+    assert.equal(row.overridden, true);
+    assert.equal(row.hectares, base.members.find((m) => m.memberRef === ref).hectares);
+    assert.equal(row.memberPayout, Math.round(5 * engine.payoutPerHectare));
+    assert.equal(body.aggregate.cooperativeSum,
+      body.members.reduce((s, m) => s + m.memberPayout, 0));
+    // the assessment is untouched by a hectare edit — tier is not an area function
+    assert.deepEqual(body.assessment, base.assessment);
+  });
+
+  test('an unknown member or an out-of-range area is refused (§15.2, §15.9)', async () => {
+    const bad = [
+      { overrides: { 'ZZ-COOP-9999': 2 } },
+      { overrides: { 'MH-COOP-2401': -1 } },
+      { overrides: { 'MH-COOP-2401': 101 } },
+      { overrides: { 'MH-COOP-2401': '2.5' } },
+      { overrides: 'nope' },
+      'not-an-object',
+    ];
+    for (const payload of bad) {
+      const res = await post('/api/cooperatives/jalna', payload);
+      assert.equal(res.status, 400, JSON.stringify(payload));
+      const body = await res.json();
+      assert.equal(typeof body.error, 'string');
+      assert.ok(!/internal|stack|\bfile\b/i.test(body.error), body.error);
+    }
+  });
+
+  test('a district with no usable assessment reports the sum as unknown, not 0 (§16.2)', async () => {
+    const res = await get('/api/cooperatives/bikaner'); // stubbed degraded
+    assert.equal(res.status, 200);
+    const body = await res.json();
+    assert.equal(body.assessment.available, false);
+    assert.equal(body.assessment.dataQuality, 'PARTIAL');
+    assert.equal(body.aggregate.cooperativeSum, null);
+    for (const m of body.members) assert.equal(m.memberPayout, 0);
   });
 });
 

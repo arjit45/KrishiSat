@@ -36,6 +36,8 @@ const climateCache = require('./engines/climateCache');
 const { computeDistrictWeather } = require('./engines/deficitEngine');
 const recommendationLog = require('./services/recommendationLog');
 const hindcast = require('./services/hindcast');
+const settlementLedger = require('./services/ledger');
+const memberRoster = require('./config/members');
 const { loadCore, CORE_SPECIFIER } = require('./engines/phenology');
 const { securityHeaders, corsAllowlist } = require('./middleware/security');
 const { rateLimit } = require('./middleware/rateLimit');
@@ -220,6 +222,39 @@ function parseSeason(req, res) {
   return season.season;
 }
 
+// ── One district, computed once ──────────────────────────────────────────────
+// /api/weather and /api/cooperatives would otherwise each fan out to both external
+// APIs for the same district in the same window. Degraded results are never cached
+// (§16.2): caching "no data" would keep serving it after the source recovers.
+async function computeDistrictCached(districtId, seasonParam) {
+  const cacheKey = `result:${districtId}:${seasonParam || 'auto'}`;
+  const cached = cacheGet(cacheKey, 10 * 60 * 1000);
+  if (cached) return cached;
+
+  const result = await computeDistrictWeather(districtId, { season: seasonParam });
+  recordSources(result.sources);
+  if (!result.degraded) cacheSet(cacheKey, result);
+  return result;
+}
+
+// ── Shared district computation ─────────────────────────────────────────────
+// /api/districts and /api/ledger both need every district. Computing once and
+// sharing keeps the ledger from doubling the fan-out to the external APIs (§23.2).
+// A district whose computation is degraded is never cached: caching "no data"
+// would keep serving it after the source recovers (§16.2).
+async function computeAllDistricts(seasonParam) {
+  const cacheKey = `all:${seasonParam || 'auto'}`;
+  const cached = cacheGet(cacheKey, 10 * 60 * 1000);
+  if (cached) return cached;
+
+  const results = await Promise.all(DISTRICT_IDS.map((id) =>
+    computeDistrictWeather(id, { season: seasonParam })));
+  for (const r of results) recordSources(r.sources);
+
+  if (results.every((r) => !r.degraded)) cacheSet(cacheKey, results);
+  return results;
+}
+
 // ── GET /api/districts (§18.1) ───────────────────────────────────────────────
 app.get('/api/districts', rateLimit('expensive'), async (req, res, next) => {
   try {
@@ -229,9 +264,7 @@ app.get('/api/districts', rateLimit('expensive'), async (req, res, next) => {
     const cached = cacheGet(cacheKey, 10 * 60 * 1000);
     if (cached) return res.json(cached);
 
-    const results = await Promise.all(DISTRICT_IDS.map((id) =>
-      computeDistrictWeather(id, { season: seasonParam })));
-    for (const r of results) recordSources(r.sources);
+    const results = await computeAllDistricts(seasonParam);
 
     const payload = results.map((r) => ({
       id: r.district.id,
@@ -262,8 +295,7 @@ app.get('/api/weather/:district', rateLimit('expensive'), validate.requireDistri
     const cached = cacheGet(cacheKey, 10 * 60 * 1000);
     if (cached) return res.json(cached);
 
-    const result = await computeDistrictWeather(req.district.id, { season: seasonParam });
-    recordSources(result.sources);
+    const result = await computeDistrictCached(req.district.id, seasonParam);
     const payload = weatherPayload(result);
 
     // A degraded response is not cached: caching "no data" would keep serving it
@@ -302,60 +334,153 @@ app.post('/api/calculate-payout', rateLimit('payout'), async (req, res, next) =>
   }
 });
 
-// ── GET /api/ledger (§18.4) ──────────────────────────────────────────────────
-// NOT REWIRED BY THIS SLICE, deliberately. F7 requires ledger entries to be drawn
-// from the F12 member records, which are the SINGLE owner of member identity, name
-// and area — and config/members.js does not exist yet. Producing entries here would
-// either fabricate member identity or become a second owner of it, so the existing
-// simulated response is left in place until the F7/F12 slice, and the defect is
-// recorded rather than hidden:
-//   TODO(F7/F12 slice): deterministic entries keyed on today's computed triggers,
-//   drawn from config/members.js, byte-identical across reloads, no Math.random(),
-//   no wall-clock timestamps (F7). The ledger stays display-only: no calculation
-//   may read it (§14.5).
-app.get('/api/ledger', (req, res) => {
-    // Regional Indian names covering all 4 districts
-    const names = [
-        'Ramesh Pawar', 'Sanjay Deshmukh', 'Anil Kadam',
-        'Amol Patil', 'Vikas Shinde', 'Hari Singh Bhati',
-        'Rajendra Prasad', 'Mahendra Choudhary', 'Gopal Purohit',
-        'Devendra Singh', 'Gaurav Malviya', 'Satish Patel',
-        'Vijay Solanki', 'Rahul Verma', 'Yogesh Joshi',
-        'K. Raghavulu', 'N. Venkatesh', 'M. Lakshmaiah',
-        'P. Srinivasa Rao', 'Chandra Reddy',
-    ];
+// ── GET/POST /api/cooperatives/:district (§18.7, F12) ────────────────────────
+// The server holds NO member state: the roster is the committed file (§11.7) and a
+// hectare edit arrives in the request and is gone when the response is sent (§16.3).
+// That is the specified behaviour, not a gap to be patched — a per-instance store on
+// a serverless runtime can lose an edit between two requests, not merely at restart.
+// The response states it so the UI can state it wherever hectares are editable.
+//
+// memberPayout = hectares × tierPayoutPerHectare, 0 when the district is not
+// triggering; cooperativeSum = Σ memberPayout (§10.2 F12).
+async function buildCooperativePayload(district, seasonParam, overrides) {
+  const core = await loadCore();
+  const result = await computeDistrictCached(district.id, seasonParam);
 
-    const regions = [
-        { cooperative: 'Jalna, Maharashtra', base: 'MH-COOP-' },
-        { cooperative: 'Bikaner, Rajasthan', base: 'RJ-COOP-' },
-        { cooperative: 'Dewas, Madhya Pradesh', base: 'MP-COOP-' },
-        { cooperative: 'Anantapur, Andhra Pradesh', base: 'AP-COOP-' },
-    ];
+  const roster = memberRoster.getMembers(district.id);
+  const engine = result.engineOutput;
+  const available = Boolean(engine);
+  const payoutPerHectare = available ? engine.payoutPerHectare : 0;
 
-    const tiers = [
-        { label: 'TIER 1 MODERATE', amount: 25000 },
-        { label: 'TIER 2 SEVERE', amount: 37500 },
-        { label: 'TIER 3 CATASTROPHIC', amount: 50000 },
-    ];
+  const rows = roster.map((m) => {
+    const overridden = Object.prototype.hasOwnProperty.call(overrides, m.memberRef);
+    const effective = overridden ? overrides[m.memberRef] : m.hectares;
+    return {
+      memberRef: m.memberRef,
+      name: m.name,
+      hectares: m.hectares,
+      effectiveHectares: effective,
+      overridden,
+      memberPayout: available && engine.isTriggerMet
+        ? Math.round(effective * payoutPerHectare)
+        : 0,
+    };
+  });
 
-    const transactions = Array.from({ length: 12 }, (_, i) => {
-        const name = names[Math.floor(Math.random() * names.length)];
-        const region = regions[Math.floor(Math.random() * regions.length)];
-        const tier = tiers[Math.floor(Math.random() * tiers.length)];
+  const totalHectares = Math.round(
+    rows.reduce((sum, r) => sum + r.effectiveHectares, 0) * 100,
+  ) / 100;
+  const triggering = Boolean(available && engine.isTriggerMet);
 
-        const time = new Date();
-        time.setMinutes(time.getMinutes() - i * 35);
+  return {
+    district: {
+      id: district.id,
+      name: district.name,
+      state: district.state,
+      zone: district.zone,
+      agroZone: district.agroZone,
+    },
+    cooperative: memberRoster.getCooperative(district.id),
+    date: result.seasonDate,
+    season: result.season,
+    cropStage: result.cropStage,
+    roster: {
+      source: 'backend/config/members.js',
+      memberCount: rows.length,
+      // §F12's required wording, so the label cannot drift from the data it describes.
+      label: `illustrative sample of ${rows.length} members`,
+      illustrative: true,
+      areasDeterministic: true,
+    },
+    persistence: {
+      serverSide: false,
+      note: 'changes are session-only — they reset when you reload (§16.3)',
+    },
+    assessment: {
+      available,
+      wsi: available ? engine.weightedShortfallIndex : null,
+      severityLevel: available ? engine.severityLevel : null,
+      payoutTier: available ? engine.payoutTier : null,
+      tierLabel: available ? core.TIER_LABELS[engine.payoutTier] : null,
+      payoutPerHectare: available ? engine.payoutPerHectare : null,
+      percentSumInsured: available ? engine.percentSumInsured : null,
+      isTriggerMet: triggering,
+      durationIsEstimated: available ? engine.durationIsEstimated : null,
+      dataQuality: result.dataQuality,
+      receiptId: result.receipt ? result.receipt.receiptId : null,
+      degradedReason: result.degradedReason,
+    },
+    aggregate: {
+      memberCount: rows.length,
+      totalHectares,
+      triggeringMembers: triggering ? rows.length : 0,
+      // null, not 0, when the assessment is unavailable: "we do not know" and "there
+      // is no payout" are different claims and must not share a number (§16.2).
+      cooperativeSum: available ? rows.reduce((sum, r) => sum + r.memberPayout, 0) : null,
+      currency: 'INR',
+    },
+    members: rows,
+    simulation: true,
+  };
+}
 
-        return {
-            farmerName: `${name} (${region.base}${2400 + i})`,
-            cooperative: region.cooperative,
-            tier: tier.label,
-            amount: tier.amount,
-            timestamp: time.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' }) + ' IST',
-        };
-    });
+app.get('/api/cooperatives/:district', rateLimit('expensive'), validate.requireDistrict,
+  async (req, res, next) => {
+    try {
+      const seasonParam = parseSeason(req, res);
+      if (seasonParam === null) return;
+      return res.json(await buildCooperativePayload(req.district, seasonParam, {}));
+    } catch (err) {
+      return next(err);
+    }
+  });
 
-    return res.json(transactions);
+app.post('/api/cooperatives/:district', rateLimit('expensive'), validate.requireDistrict,
+  async (req, res, next) => {
+    try {
+      const seasonParam = parseSeason(req, res);
+      if (seasonParam === null) return;
+
+      // A reference that is not in THIS district's roster would let a client append
+      // phantom members and inflate the cooperative total (§15.2).
+      const validRefs = new Set(
+        memberRoster.getMembers(req.district.id).map((m) => m.memberRef),
+      );
+      const parsed = validate.validateHectareOverrides(req.body, validRefs);
+      if (!parsed.ok) return res.status(400).json({ error: parsed.error });
+
+      const payload = await buildCooperativePayload(req.district, seasonParam, parsed.value);
+      payload.persistence.overrideCount = Object.keys(parsed.value).length;
+      return res.json(payload);
+    } catch (err) {
+      return next(err);
+    }
+  });
+
+// ── GET /api/ledger (§18.4, F7) ──────────────────────────────────────────────
+// Causal, deterministic, and drawn from the SINGLE owner of member identity
+// (config/members.js): entries exist only for districts currently meeting a payout
+// trigger, and each entry's tier and amount are that district's computed tier and
+// amount. Timestamps are anchored to a fixed daily settlement time plus fixed
+// per-entry offsets, so a reload is byte-identical (§F7). The ledger is display-only:
+// no calculation may read it (§14.5).
+//
+// F7 requires the ledger to be LABELED (§19.2). The label travels as a header so the
+// body stays exactly the bare LedgerEntry array §18.4 specifies, while any client
+// reading this response still gets the disclosure.
+app.get('/api/ledger', rateLimit('expensive'), async (req, res, next) => {
+  try {
+    const seasonParam = parseSeason(req, res);
+    if (seasonParam === null) return;
+
+    const results = await computeAllDistricts(seasonParam);
+    const entries = settlementLedger.buildLedger(results);
+
+    res.setHeader('X-Ledger-Label', 'Demo Settlement Log - Simulated, not real transactions');
+    return res.json(entries);
+  } catch (err) {
+    return next(err);
+  }
 });
 
 // ── GET /api/backtest/:district (§18.6) ─────────────────────────────────────
@@ -401,22 +526,44 @@ app.get('/ks_core.mjs', (req, res) => {
   return res.send(source);
 });
 
-// ── POST /api/verify-receipt (§18.5) ───────────────────────────────────────
-// NOT IMPLEMENTED, and answering 501 rather than 404 so the gap is visible.
+// ── POST /api/verify-receipt (§18.5) ────────────────────────────────────────
+// Server-side verification of a published receipt: hash the canonicalInput the
+// client holds and compare it with the receiptId it also holds.
 //
-// Server-side verification would have to hash the PUBLISHED canonical string, and
-// the only digest primitive in the product is `ksReceipt`, which canonicalises an
-// EngineInput first — feeding it an already-scaled string would scale the values a
-// second time and produce a different, wrong digest. The integer SHA-256 that could
-// hash a bare string lives in the core's test-only `_internals`, which §14.2
-// forbids on a product path. F10's verification therefore ships where the spec puts
-// it: the browser hashes the published `canonicalInput` with WebCrypto and asserts
-// the module's own `coreChecksum` first (§15.8). Adding a server-side variant needs
-// a PRD change, not a workaround.
-app.post('/api/verify-receipt', (req, res) => res.status(501).json({
-  error: 'Not implemented',
-  detail: 'Server-side receipt verification is specified by PRD §18.5 but not implemented. Recompute the receipt in the browser instead: assert that the imported module hashes to coreChecksum (/api/health), then SHA-256 the published canonicalInput and compare it with receiptId.',
-}));
+// This hashes the PUBLISHED CANONICAL STRING, which is exactly what §18.5's request
+// shape provides. It uses Node's own SHA-256 rather than importing the core's
+// test-only `_internals`, which §14.2 forbids on a product path — and the two are
+// the same digest: §22.1 pins `ksReceipt(input).digest` against
+// `crypto.createHash('sha256')` over the same canonical bytes (core.test.mjs). So
+// this endpoint cannot disagree with a receipt the core produced, and the browser
+// path (WebCrypto over the published string, checked against coreChecksum first)
+// gives the identical answer.
+app.post('/api/verify-receipt', rateLimit('normal'), (req, res) => {
+  const body = req.body;
+  if (!body || typeof body !== 'object' || Array.isArray(body)) {
+    return res.status(400).json({ error: 'Invalid body.' });
+  }
+
+  const { receiptId, canonicalInput } = body;
+  if (typeof receiptId !== 'string' || !/^[0-9a-f]{64}$/.test(receiptId)) {
+    return res.status(400).json({ error: 'Invalid receiptId.' });
+  }
+  if (typeof canonicalInput !== 'string' || canonicalInput.length === 0
+    || canonicalInput.length > 8192) {
+    return res.status(400).json({ error: 'Invalid canonicalInput.' });
+  }
+
+  const recomputedReceiptId = crypto.createHash('sha256')
+    .update(canonicalInput, 'utf8')
+    .digest('hex');
+
+  // A mismatch is a RESULT, not a server error: the receipt is simply not the one
+  // the canonical string produces.
+  return res.json({
+    match: recomputedReceiptId === receiptId,
+    recomputedReceiptId,
+  });
+});
 
 // ── GET /api/cron/recommendations (§21.2, F15) ─────────────────────────────
 // The authenticated cron entrypoint declared in vercel.json. Vercel sends
@@ -547,7 +694,12 @@ app.use((err, req, res, next) => {
   // eslint-disable-next-line no-console
   console.error(`[KrishiSat] ${req.method} ${req.originalUrl} → ${status}: ${err.message}`);
   if (res.headersSent) return;
-  res.status(status).json({ error: 'Internal error.' });
+  // A 4xx is the client's problem and may say so; only a 5xx gets the opaque
+  // message. Either way the detail stays in the log (§15.9) — an earlier version
+  // answered every failure with "Internal error.", which is both wrong for a 400
+  // and useless to the caller.
+  const message = status >= 500 ? 'Internal error.' : 'Invalid request.';
+  res.status(status).json({ error: message });
 });
 
 // ── Listen only when run directly ───────────────────────────────────────────
