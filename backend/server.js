@@ -47,8 +47,10 @@ const { rateLimit } = require('./middleware/rateLimit');
 const validate = require('./middleware/validate');
 
 const CORE_PATH = path.resolve(__dirname, 'core', 'ks_core.mjs');
-const RECEIPT_ALGORITHM = 'sha256';
-const CANONICAL_ENCODING = 'scaled-int-v1';
+// `canonicalEncoding` is fixed by the core's canonicaliser (§10.2 F10); the
+// literal is duplicated here only so the route can assert the served value.
+
+const serveStatic = require('serve-static');
 
 const app = express();
 app.disable('x-powered-by');
@@ -860,6 +862,29 @@ app.get('/api/health', rateLimit('normal'), async (req, res) => {
     log,
   });
 });
+
+// ── Frontend (local dev + non-Vercel standalone run only) ──────────────────────
+// In production on Vercel the platform serves frontend/dist and rewrites /api/*
+// and /ks_core.mjs to this handler (§21.2), so this middleware is a convenience
+// for running the API alone against an already-built frontend. It MUST NOT shadow
+// any /api/* or /ks_core.mjs route.
+{
+  const frontendDist = path.resolve(__dirname, '../frontend/dist');
+  const distExists = fs.existsSync(frontendDist) && fs.statSync(frontendDist).isDirectory();
+  if (distExists) {
+    // SPA fallback for any non-API, non-module path — serves index.html, not a
+    // raw directory listing (§21.2 SPA fallback semantics).
+    const serveFrontend = serveStatic(frontendDist, {
+      index: ['index.html'],
+      extensions: ['html'],
+      fallthrough: false,
+    });
+    app.use((req, res, next) => {
+      if (req.path.startsWith('/api/') || req.path === '/ks_core.mjs' || req.path.startsWith('/api/')) return next();
+      serveFrontend(req, res, next);
+    });
+  }
+}
 
 // ── 404 + error handling ────────────────────────────────────────────────────
 app.use((req, res) => res.status(404).json({ error: 'Not found.' }));

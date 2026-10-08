@@ -32,7 +32,7 @@ export const TIER_FALLBACK = '—';
 
 /** §19.3 header badge: colour and wording for each AggregateQuality. */
 export const QUALITY_BADGE = Object.freeze({
-  LIVE: { label: 'LIVE DATA', cls: 'text-emerald-400 bg-emerald-950/60 border-emerald-800/50', dot: 'bg-emerald-400' },
+  LIVE: { label: 'LIVE TELEMETRY', cls: 'text-emerald-400 bg-emerald-950/60 border-emerald-800/50', dot: 'bg-emerald-400' },
   PARTIAL: { label: 'PARTIAL — component using fallback', cls: 'text-amber-400 bg-amber-950/60 border-amber-800/50', dot: 'bg-amber-400' },
   OFFLINE: { label: 'OFFLINE — all data from fallback', cls: 'text-red-400 bg-red-950/60 border-red-800/50', dot: 'bg-red-400' },
 });

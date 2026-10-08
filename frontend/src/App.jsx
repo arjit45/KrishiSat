@@ -111,8 +111,11 @@ export default function App() {
   const overridesRef = useRef(overrides);
   overridesRef.current = overrides;
 
-  const scenario = weather?.scenario || null;
+  // Header needs to know the active scenario even when the active district is not
+  // the scenario district (§19.6). weather?.scenario is set only for the matching
+  // district, so we keep the separate app-level active scenario id.
   const activeScenarioId = scenarioId;
+  const scenario = weather?.scenario || (activeScenarioId ? scenarios.find((s) => s.id === activeScenarioId) || null : null);
 
   // ── one-time: catalogue, log history, health ──────────────────────────────
   useEffect(() => {

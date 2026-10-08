@@ -57,7 +57,7 @@ export default function ScenarioPanel({
             } disabled:opacity-50 disabled:cursor-not-allowed`}
             title={listError || 'Historic replay (F14) — real archive data'}
           >
-            <option value="">SCENARIO — pick a historic replay…</option>
+            <option value="">SCENARIO — historic replay (real archive data)</option>
             {forDistrict.map((s) => (
               <option key={s.id} value={s.id}>
                 {s.label}{s.trigger ? '' : ' (non-trigger)'}

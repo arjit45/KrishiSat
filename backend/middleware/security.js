@@ -17,10 +17,10 @@ const DEFAULT_DEV_ORIGINS = Object.freeze([
 const CSP = [
   "default-src 'self'",
   "script-src 'self'",
-  "style-src 'self' 'unsafe-inline'",
+  "style-src 'self' 'unsafe-inline' https://fonts.googleapis.com",
   "img-src 'self' data: https://*.tile.openstreetmap.org https://tile.openstreetmap.org",
-  "connect-src 'self' https://api.open-meteo.com https://archive-api.open-meteo.com https://power.larc.nasa.gov",
-  "font-src 'self' data:",
+  "connect-src 'self' https://api.open-meteo.com https://archive-api.open-meteo.com https://power.larc.nasa.gov https://fonts.googleapis.com",
+  "font-src 'self' data: https://fonts.gstatic.com",
   "object-src 'none'",
   "base-uri 'self'",
   "form-action 'self'",

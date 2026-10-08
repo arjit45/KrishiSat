@@ -32,9 +32,11 @@ function fallbackComponents(sourceQuality) {
 export default function Header({ quality, sourceQuality, scenario, coreVersion, health }) {
   const badge = qualityOf(quality);
   const fallbacks = fallbackComponents(sourceQuality);
-  const label = quality === 'PARTIAL' && fallbacks.length
-    ? `PARTIAL — ${fallbacks.join(', ')} using fallback`
-    : badge.label;
+  const label = scenario
+    ? 'SCENARIO — HISTORIC REPLAY'
+    : quality === 'PARTIAL' && fallbacks.length
+      ? `PARTIAL — ${fallbacks.join(', ')} using fallback`
+      : badge.label;
 
   return (
     <header className="border-b border-slate-800 bg-slate-950/90 backdrop-blur sticky top-0 z-50">
